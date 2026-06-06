@@ -15,4 +15,6 @@ const newsSchema = new mongoose.Schema({
     isPinned: { type: Boolean, default: false }
 }, { timestamps: true });
 
+
+
 module.exports = mongoose.model('News', newsSchema);

@@ -24,4 +24,24 @@ const upload = multer({
     limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-module.exports = { cloudinary, upload };
+// Storage for documents (PDF etc.)
+const docStorage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: (req, file) => {
+        const isPdf = file.mimetype === 'application/pdf';
+        return {
+            folder: isPdf ? 'school-news-pdf' : 'school-gallery',
+            resource_type: 'auto',
+            allowed_formats: isPdf ? ['pdf'] : ['jpg','jpeg','png','webp','gif'],
+            public_id: isPdf ? `${Date.now()}-${file.originalname.replace(/\.[^/.]+$/, '')}` : undefined,
+            format: isPdf ? 'pdf' : undefined
+        };
+    }
+});
+
+const uploadDoc = multer({
+    storage: docStorage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
+
+module.exports = { cloudinary, upload, uploadDoc };

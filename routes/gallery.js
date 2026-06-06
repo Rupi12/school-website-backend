@@ -66,4 +66,19 @@ router.delete('/:id', auth, async (req, res) => {
     }
 });
 
+
+router.put('/:id', auth, async (req, res) => {
+    try {
+        const photo = await Gallery.findByIdAndUpdate(req.params.id, {
+            title: req.body.title,
+            category: req.body.category,
+            description: req.body.description
+        }, { new: true });
+        res.json({ success: true, message: 'Updated', photo });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+});
+
+
 module.exports = router;

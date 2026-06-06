@@ -38,7 +38,10 @@ try {
 
 
     app.use('/api/news', require('./routes/news'));
-    console.log('13. Gallery route loaded');
+    console.log('13. news route loaded');
+
+    app.use('/api/documents', require('./routes/documents'));
+    console.log('14. documents route loaded');
 } catch (err) {
     console.error('❌ Error loading routes:', err.message);
     process.exit(1);
