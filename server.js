@@ -42,6 +42,14 @@ try {
 
     app.use('/api/documents', require('./routes/documents'));
     console.log('14. documents route loaded');
+
+    app.use('/api/student', require('./routes/student'));
+    console.log('15. student route loaded');
+
+    app.use('/api/student-admin', require('./routes/studentAdmin'));
+    console.log('16. student-admin loaded');
+
+
 } catch (err) {
     console.error('❌ Error loading routes:', err.message);
     process.exit(1);
