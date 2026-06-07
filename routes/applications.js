@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Application = require('../models/Application');
 const auth = require('../middleware/auth');
+const requirePermission = require('../middleware/permission');
 
 // POST - Submit new application (Public)
 router.post('/', async (req, res) => {
@@ -21,8 +22,10 @@ router.post('/', async (req, res) => {
     }
 });
 
+
+
 // GET - All applications (Admin only)
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, requirePermission('applications'), async (req, res) => {
     try {
         const applications = await Application.find().sort({ createdAt: -1 });
         res.json({ 
@@ -38,8 +41,10 @@ router.get('/', auth, async (req, res) => {
     }
 });
 
+
+
 // GET - Single application (Admin only)
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, requirePermission('applications'), async (req, res) => {
     try {
         const application = await Application.findById(req.params.id);
         if (!application) {
@@ -58,7 +63,7 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // PUT - Update status (Admin only)
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, requirePermission('applications'), async (req, res) => {
     try {
         const application = await Application.findByIdAndUpdate(
             req.params.id,
@@ -75,7 +80,7 @@ router.put('/:id', auth, async (req, res) => {
 });
 
 // DELETE - Remove application (Admin only)
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('applications'), async (req, res) => {
     try {
         await Application.findByIdAndDelete(req.params.id);
         res.json({ 
@@ -89,5 +94,8 @@ router.delete('/:id', auth, async (req, res) => {
         });
     }
 });
+
+
+
 
 module.exports = router;

@@ -3,6 +3,7 @@ const router = express.Router();
 const News = require('../models/News');
 const auth = require('../middleware/auth');
 const { cloudinary, upload } = require('../config/cloudinary');
+const requirePermission = require('../middleware/permission');
 
 router.get('/', async (req, res) => {
     try {
@@ -31,7 +32,7 @@ router.get('/announcements', async (req, res) => {
     }
 });
 
-router.post('/', auth, upload.single('image'), async (req, res) => {
+router.post('/', auth,requirePermission('news'), upload.single('image'), async (req, res) => {
     try {
         const newsData = {
             title: req.body.title,
@@ -52,7 +53,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     }
 });
 
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('news'),async (req, res) => {
     try {
         const news = await News.findById(req.params.id);
         if (!news) return res.status(404).json({ success: false, message: 'Not found' });

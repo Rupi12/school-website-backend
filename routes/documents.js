@@ -3,6 +3,7 @@ const router = express.Router();
 const Document = require('../models/Document');
 const auth = require('../middleware/auth');
 const { cloudinary, uploadDoc } = require('../config/cloudinary');
+const requirePermission = require('../middleware/permission');
 
 // GET all (Public)
 router.get('/', async (req, res) => {
@@ -15,7 +16,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST upload (Admin)
-router.post('/', auth, uploadDoc.single('file'), async (req, res) => {
+router.post('/', auth, requirePermission('documents'), uploadDoc.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
         const doc = new Document({
@@ -32,7 +33,7 @@ router.post('/', auth, uploadDoc.single('file'), async (req, res) => {
 });
 
 // DELETE (Admin)
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('documents'),  async (req, res) => {
     try {
         const doc = await Document.findById(req.params.id);
         if (!doc) return res.status(404).json({ success: false, message: 'Not found' });

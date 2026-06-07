@@ -3,6 +3,7 @@ const router = express.Router();
 const Gallery = require('../models/Gallery');
 const auth = require('../middleware/auth');
 const { cloudinary, upload } = require('../config/cloudinary');
+const requirePermission = require('../middleware/permission');
 
 // GET - All photos (Public)
 router.get('/', async (req, res) => {
@@ -15,7 +16,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST - Upload photo with file (Admin only)
-router.post('/', auth, upload.single('image'), async (req, res) => {
+router.post('/', auth, requirePermission('gallery'), upload.single('image'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ 
@@ -44,7 +45,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
 });
 
 // DELETE - Remove photo (Admin only)
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('gallery'), async (req, res) => {
     try {
         const photo = await Gallery.findById(req.params.id);
         
@@ -67,7 +68,7 @@ router.delete('/:id', auth, async (req, res) => {
 });
 
 
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth,requirePermission('gallery'), async (req, res) => {
     try {
         const photo = await Gallery.findByIdAndUpdate(req.params.id, {
             title: req.body.title,

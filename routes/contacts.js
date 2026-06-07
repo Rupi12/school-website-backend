@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Contact = require('../models/Contact');
 const auth = require('../middleware/auth');
+const requirePermission = require('../middleware/permission');
 
 // POST - Submit contact message (Public)
 router.post('/', async (req, res) => {
@@ -21,7 +22,7 @@ router.post('/', async (req, res) => {
 });
 
 // GET - All messages (Admin only)
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, requirePermission('messages'), async (req, res) => {
     try {
         const contacts = await Contact.find().sort({ createdAt: -1 });
         res.json({ 
@@ -38,7 +39,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 // PUT - Mark as read (Admin only)
-router.put('/:id/read', auth, async (req, res) => {
+router.put('/:id/read', auth, requirePermission('messages'), async (req, res) => {
     try {
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
@@ -55,7 +56,7 @@ router.put('/:id/read', auth, async (req, res) => {
 });
 
 // DELETE - Remove message (Admin only)
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('messages'), async (req, res) => {
     try {
         await Contact.findByIdAndDelete(req.params.id);
         res.json({ 
