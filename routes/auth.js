@@ -4,6 +4,20 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const Admin = require('../models/Admin');
 const auth = require('../middleware/auth');
+const rateLimit = require('express-rate-limit'); // Add this line
+
+
+// Rate Limiter: Blocks IP after 5 failed login attempts for 15 minutes
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, 
+    message: { 
+        success: false, 
+        message: 'Too many login attempts from this IP, please try again after 15 minutes.' 
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 // POST - Register admin
 router.post('/register', async (req, res) => {
@@ -45,7 +59,7 @@ router.post('/register', async (req, res) => {
 });
 
 // POST - Login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { username, password } = req.body;
 
@@ -156,5 +170,51 @@ router.delete('/admins/:id', auth, superOnly, async (req, res) => {
 
 
 
+// PUT - Securely reset a sub-admin's password (Superadmin only)
+router.put('/admins/:id/reset-password', auth, superOnly, async (req, res) => {
+    try {
+        const { newPassword } = req.body;
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long' });
+        }
+
+        // Hash the new password securely
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // We use req.params.id to update the specific sub-admin
+        await Admin.findByIdAndUpdate(req.params.id, { password: hashedPassword });
+        
+        res.json({ success: true, message: 'Password reset successfully!' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Superadmin changes own password
+router.put('/change-password', auth, async (req, res) => {
+    try {
+        if (req.admin.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Super admin only' });
+        }
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Both passwords required' });
+        }
+        if (newPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+        }
+        const admin = await Admin.findById(req.admin.id);
+        const isMatch = await bcrypt.compare(currentPassword, admin.password);
+        if (!isMatch) {
+            return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+        }
+        admin.password = await bcrypt.hash(newPassword, 10);
+        await admin.save();
+        res.json({ success: true, message: 'Password changed successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
 
 module.exports = router;

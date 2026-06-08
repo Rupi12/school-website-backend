@@ -18,9 +18,41 @@ const app = express();
 console.log('8. Express app created');
 
 // Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const helmet = require('helmet');
+const mongoSanitize = require('express-mongo-sanitize');
+const xss = require('xss-clean');
+
+const hpp = require('hpp');
+
+// Prevent HTTP Parameter Pollution
+app.use(hpp());
+
+// --- HARDENED MIDDLEWARE ---
+
+// 1. Secure HTTP Headers (Helmet)
+// Hides "X-Powered-By: Express" and sets strict rules for content execution
+app.use(helmet());
+
+// 2. Strict CORS Policy
+// Right now, any website in the world can make requests to your API. 
+// We must restrict this to ONLY your specific Netlify frontend URL.
+app.use(cors({
+    origin: ['https://amarjyotischooll.netlify.app', 'http://localhost:5500', 'http://127.0.0.1:5500'], 
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true // Required if you ever use cookies
+}));
+
+// Body parser (Existing)
+app.use(express.json({ limit: '10kb' })); // Limit body size to prevent payload crashing
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// 3. Data Sanitization against NoSQL Query Injection
+// Prevents hackers from passing {"$gt": ""} into login fields to bypass passwords
+app.use(mongoSanitize());
+
+// 4. Data Sanitization against XSS (Cross-Site Scripting)
+// Cleans any user input (like news descriptions or contact messages) of malicious HTML/JS tags
+app.use(xss());
 
 // Routes
 try {

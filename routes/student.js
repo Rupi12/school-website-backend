@@ -9,9 +9,19 @@ const Timetable = require('../models/Timetable');
 const Fee = require('../models/Fee');
 const StudentDoc = require('../models/StudentDoc');
 const studentAuth = require('../middleware/studentAuth');
+const rateLimit = require('express-rate-limit');
+
+const studentLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Allow 10 attempts for students
+    message: { 
+        success: false, 
+        message: 'Too many login attempts. Please wait 15 minutes and try again.' 
+    }
+});
 
 // Student Login
-router.post('/login', async (req, res) => {
+router.post('/login', studentLoginLimiter, async (req, res) => {
     try {
         const { rollNumber, password } = req.body;
         const student = await Student.findOne({ rollNumber });
