@@ -3,9 +3,10 @@ const router = express.Router();
 const Contact = require('../models/Contact');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/permission');
+const { formLimiter } = require('../middleware/rateLimiter');
 
 // POST - Submit contact message (Public)
-router.post('/', async (req, res) => {
+router.post('/', formLimiter, async (req, res) => {
     try {
         const contact = new Contact(req.body);
         await contact.save();

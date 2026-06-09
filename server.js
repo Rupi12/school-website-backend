@@ -17,6 +17,8 @@ console.log('7. MONGODB_URI exists:', !!process.env.MONGODB_URI);
 const app = express();
 console.log('8. Express app created');
 
+app.set('trust proxy', 1);
+
 // Middleware
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');

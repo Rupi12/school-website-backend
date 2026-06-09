@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 
+
 function studentAuth(req, res, next) {
     try {
         const token = req.header('Authorization')?.replace('Bearer ', '');

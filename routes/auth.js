@@ -5,58 +5,12 @@ const bcrypt = require('bcryptjs');
 const Admin = require('../models/Admin');
 const auth = require('../middleware/auth');
 const rateLimit = require('express-rate-limit'); // Add this line
+const { loginLimiter } = require('../middleware/rateLimiter');
 
 
-// Rate Limiter: Blocks IP after 5 failed login attempts for 15 minutes
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, 
-    message: { 
-        success: false, 
-        message: 'Too many login attempts from this IP, please try again after 15 minutes.' 
-    },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
 
-// POST - Register admin
-router.post('/register', async (req, res) => {
-    try {
-        const { username, email, password } = req.body;
-        
-        const existingAdmin = await Admin.findOne({ 
-            $or: [{ email }, { username }] 
-        });
-        
-        if (existingAdmin) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Admin already exists' 
-            });
-        }
 
-        // Hash password manually
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
 
-        const admin = new Admin({ 
-            username, 
-            email, 
-            password: hashedPassword 
-        });
-        await admin.save();
-
-        res.status(201).json({ 
-            success: true, 
-            message: 'Admin registered successfully' 
-        });
-    } catch (error) {
-        res.status(400).json({ 
-            success: false, 
-            message: error.message 
-        });
-    }
-});
 
 // POST - Login
 router.post('/login', loginLimiter, async (req, res) => {

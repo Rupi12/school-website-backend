@@ -3,9 +3,10 @@ const router = express.Router();
 const Application = require('../models/Application');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/permission');
+const { formLimiter } = require('../middleware/rateLimiter');
 
 // POST - Submit new application (Public)
-router.post('/', async (req, res) => {
+router.post('/', formLimiter, async (req, res) => {
     try {
         const application = new Application(req.body);
         await application.save();
