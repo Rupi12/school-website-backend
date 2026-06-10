@@ -230,6 +230,38 @@ router.post('/bulk', upload.single('file'), async (req, res) => {
 });
 
 
+// GET /api/student/my-fees — returns logged-in student's fees + payment history
+router.get('/my-fees', studentAuth, async (req, res) => {
+    try {
+        const fees = await Fee.find({ studentId: req.student.id }).sort({ createdAt: -1 });
+
+        const data = fees.map(f => {
+            const totalPaid = f.payments.reduce((s, p) => s + p.amount, 0);
+            return {
+                _id: f._id,
+                academicYear: f.academicYear,
+                category: f.category,
+                feeType: f.feeType,
+                amount: f.amount,
+                totalPaid,
+                pending: f.amount - totalPaid,
+                status: f.status,
+                dueDate: f.dueDate,
+                // payment history — internal field 'collectedBy' intentionally omitted
+                payments: f.payments.map(p => ({
+                    amount: p.amount,
+                    date: p.date,
+                    mode: p.mode,
+                    receiptNo: p.receiptNo
+                }))
+            };
+        });
+
+        res.json({ success: true, fees: data });
+    } catch (e) {
+        res.status(500).json({ success: false, message: 'Failed to load fees' });
+    }
+});
 
 
 module.exports = router;

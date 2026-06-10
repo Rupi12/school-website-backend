@@ -26,6 +26,8 @@ const xss = require('xss-clean');
 
 const hpp = require('hpp');
 
+
+
 // Prevent HTTP Parameter Pollution
 app.use(hpp());
 
@@ -40,7 +42,7 @@ app.use(helmet());
 // We must restrict this to ONLY your specific Netlify frontend URL.
 app.use(cors({
     origin: ['https://amarjyotischooll.netlify.app', 'http://localhost:5500', 'http://127.0.0.1:5500'], 
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true // Required if you ever use cookies
 }));
 
@@ -82,6 +84,9 @@ try {
 
     app.use('/api/student-admin', require('./routes/studentAdmin'));
     console.log('16. student-admin loaded');
+
+    app.use('/api/audit', require('./routes/audit'));
+    console.log('16. Logs audit');
 
 
 } catch (err) {
