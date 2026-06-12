@@ -41,7 +41,7 @@ app.use(helmet());
 // Right now, any website in the world can make requests to your API. 
 // We must restrict this to ONLY your specific Netlify frontend URL.
 app.use(cors({
-    origin: ['https://amarjyotischooll.netlify.app', 'http://localhost:5500', 'http://127.0.0.1:5500'], 
+    origin: ['http://localhost:5500', 'http://127.0.0.1:5500','https://www.amarjyotischool.in','https://amarjyotischool.in', 'https://amarjyotischooll.netlify.app',], 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true // Required if you ever use cookies
 }));
@@ -86,7 +86,7 @@ try {
     console.log('16. student-admin loaded');
 
     app.use('/api/audit', require('./routes/audit'));
-    console.log('16. Logs audit');
+    console.log('17. Logs audit');
 
 
 } catch (err) {
