@@ -45,7 +45,7 @@ router.put('/:id/read', auth, requirePermission('messages'), async (req, res) =>
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
             { isRead: true },
-            { new: true }
+            { returnDocument: 'after' }
         );
         res.json({ success: true, contact });
     } catch (error) {

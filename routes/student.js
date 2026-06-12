@@ -16,6 +16,8 @@ const csv = require('csv-parser');
 const fs = require('fs');
 const upload = multer({ dest: 'uploads/' }); // Setup multer for temporary file uploads
 
+const { generateReceipt } = require('../utils/receiptGenerator');
+
 const studentLoginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 10, // Allow 10 attempts for students
@@ -107,7 +109,7 @@ router.put('/:id', async (req, res) => {
                 parentName, 
                 phone 
             },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (!updatedStudent) {
@@ -138,7 +140,7 @@ router.put('/:id/reset-password', async (req, res) => {
         const updatedStudent = await Student.findByIdAndUpdate(
             req.params.id,
             { password: hashedPassword },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (!updatedStudent) {
@@ -263,5 +265,45 @@ router.get('/my-fees', studentAuth, async (req, res) => {
     }
 });
 
+
+// Student/parent downloads their OWN receipt (IDOR-safe via JWT)
+router.get('/my-receipt/:receiptNo', studentAuth, async (req, res) => {
+  try {
+    // studentId comes from verified JWT, NOT the URL — prevents tampering
+    const fee = await Fee.findOne({
+      studentId: req.student.id,
+      'payments.receiptNo': req.params.receiptNo,
+    });
+    if (!fee) return res.status(404).json({ error: 'Receipt not found' });
+
+    const payment = fee.payments.find(p => p.receiptNo === req.params.receiptNo);
+    const student = await Student.findById(req.student.id).lean();
+
+    const paidTillDate = fee.payments.reduce((s, p) => s + (p.amount || 0), 0);
+
+    const pdf = await generateReceipt({
+      receiptNo: payment.receiptNo,
+      studentName: student.name,
+      rollNumber: student.rollNumber,
+      class: student.class,
+      section: student.section,
+      category: fee.category,
+      academicYear: fee.academicYear,
+      amount: payment.amount,
+      mode: payment.mode,
+      date: payment.date,
+      collectedBy: payment.collectedBy,
+      totalFee: fee.amount,
+      paidTillDate,
+      balance: (fee.amount || 0) - paidTillDate,
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Receipt_${payment.receiptNo}.pdf"`);
+    res.send(pdf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

@@ -47,8 +47,8 @@ app.use(cors({
 }));
 
 // Body parser (Existing)
-app.use(express.json({ limit: '10kb' })); // Limit body size to prevent payload crashing
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(express.json({ limit: '1mb' }));  // limit to save it payload crashing 
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // 3. Data Sanitization against NoSQL Query Injection
 // Prevents hackers from passing {"$gt": ""} into login fields to bypass passwords

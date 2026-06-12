@@ -90,7 +90,7 @@ router.post('/admins', auth, superOnly, async (req, res) => {
 router.put('/admins/:id', auth, superOnly, async (req, res) => {
     try {
         const admin = await Admin.findByIdAndUpdate(req.params.id,
-            { permissions: req.body.permissions }, { new: true }).select('-password');
+            { permissions: req.body.permissions }, { returnDocument: 'after' }).select('-password');
 
         await logAction(req, {
             action: `Updated permissions for "${admin.username}"`,

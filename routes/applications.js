@@ -69,7 +69,7 @@ router.put('/:id', auth, requirePermission('applications'), async (req, res) => 
         const application = await Application.findByIdAndUpdate(
             req.params.id,
             { status: req.body.status },
-            { new: true }
+            { returnDocument: 'after' }
         );
         res.json({ success: true, application });
     } catch (error) {

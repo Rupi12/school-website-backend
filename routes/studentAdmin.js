@@ -12,8 +12,78 @@ const { uploadDoc } = require('../config/cloudinary');
 const { cloudinary } = require('../config/cloudinary');
 const requirePermission = require('../middleware/permission');
 const { logAction } = require('../utils/auditLogger');   // 🔍 AUDIT
+const { generateReceipt } = require('../utils/receiptGenerator');
+
 
 // ---- SPECIFIC ROUTES FIRST (before :id routes) ----
+
+// Download a receipt PDF for a specific payment (admin)
+router.get('/receipt/:receiptNo', auth, requirePermission('students.manage'), async (req, res) => {
+  try {
+    const fee = await Fee.findOne({ 'payments.receiptNo': req.params.receiptNo });
+    if (!fee) return res.status(404).json({ error: 'Receipt not found' });
+
+    const payment = fee.payments.find(p => p.receiptNo === req.params.receiptNo);
+    const student = await Student.findById(fee.studentId).lean();
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+
+    const paidTillDate = fee.payments.reduce((s, p) => s + (p.amount || 0), 0);
+
+    const pdf = await generateReceipt({
+      receiptNo: payment.receiptNo,
+      studentName: student.name,
+      rollNumber: student.rollNumber,
+      class: student.class,
+      section: student.section,
+      category: fee.category,
+      academicYear: fee.academicYear,
+      amount: payment.amount,
+      mode: payment.mode,
+      date: payment.date,
+      collectedBy: payment.collectedBy,
+      totalFee: fee.amount,
+      paidTillDate,
+      balance: (fee.amount || 0) - paidTillDate,
+    });
+
+    await logAction(req, {
+      action: `Downloaded receipt ${payment.receiptNo}`,
+      category: 'FEE', targetName: student.name, targetId: student._id,
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Receipt_${payment.receiptNo}.pdf"`);
+    res.send(pdf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// PUBLIC verification endpoint (no auth) — used by QR scan
+router.get('/verify-receipt/:receiptNo', async (req, res) => {
+  try {
+    const fee = await Fee.findOne({ 'payments.receiptNo': req.params.receiptNo }).lean();
+    if (!fee) return res.json({ valid: false });
+
+    const payment = fee.payments.find(p => p.receiptNo === req.params.receiptNo);
+    const student = await Student.findById(fee.studentId).select('name class section').lean();
+
+    res.json({
+      valid: true,
+      receiptNo: payment.receiptNo,
+      studentName: student?.name,
+      class: `${student?.class} - ${student?.section || '-'}`,
+      category: fee.category,
+      academicYear: fee.academicYear,
+      amount: payment.amount,
+      date: payment.date,
+    });
+  } catch (err) {
+    res.json({ valid: false });
+  }
+});
+
 
 // Get students by class
 router.get('/students/class/:class', auth, requirePermission('students.manage'), async (req, res) => {
@@ -38,7 +108,7 @@ router.get('/classes', auth, requirePermission('students.manage'), async (req, r
 });
 
 // Get existing attendance for class + date
-router.get('/attendance/check', auth, requirePermission('students.bulk'), async (req, res) => {
+router.get('/attendance/check', auth, requirePermission('students.manage'), async (req, res) => {
     try {
         const { class: cls, date } = req.query;
         const day = new Date(date);
@@ -69,7 +139,7 @@ router.get('/student-data/:id', auth, requirePermission('students.manage'), asyn
 });
 
 // Bulk attendance
-router.post('/attendance/bulk', auth, requirePermission('students.bulk'), async (req, res) => {
+router.post('/attendance/bulk', auth, requirePermission('students.manage'), async (req, res) => {
     try {
         const { date, records } = req.body;
         const day = new Date(date);
@@ -156,7 +226,7 @@ router.put('/students/:id', auth, requirePermission('students.manage'), async (r
         const student = await Student.findByIdAndUpdate(
             req.params.id,
             { name, rollNumber, class: cls, section, parentName, phone },
-            { new: true }
+            { returnDocument: 'after' }
         ).select('-password');
         res.json({ success: true, message: 'Student updated', student });
     } catch (error) {
@@ -225,7 +295,7 @@ router.put('/results/:id', auth, requirePermission('students.manage'), async (re
         const result = await Result.findByIdAndUpdate(
             req.params.id,
             { examName, term, academicYear, examDate, subjects, remark },
-            { new: true }
+            { returnDocument: 'after' }
         );
         res.json({ success: true, result });
     } catch (error) {
@@ -264,12 +334,12 @@ router.post('/attendance', auth, requirePermission('students.bulk'), async (req,
 });
 
 // ---- TIMETABLE ----
-router.post('/timetable', auth, requirePermission('students.timetable'), async (req, res) => {
+router.post('/timetable', auth, requirePermission('students.manage'), async (req, res) => {
     try {
         const tt = await Timetable.findOneAndUpdate(
             { class: req.body.class, section: req.body.section || '' },
             req.body,
-            { new: true, upsert: true }
+            { returnDocument: 'after', upsert: true }
         );
         res.json({ success: true, message: 'Timetable saved', timetable: tt });
     } catch (error) {
@@ -299,7 +369,7 @@ router.patch('/fees/:id', auth, requirePermission('students.manage'), async (req
     try {
         const { academicYear, feeType, amount, category, dueDate } = req.body;
         const fee = await Fee.findByIdAndUpdate(req.params.id,
-            { academicYear, feeType, amount, category, dueDate }, { new: true });
+            { academicYear, feeType, amount, category, dueDate }, { returnDocument: 'after' });
         if (fee) {
             const totalPaid = fee.payments.reduce((s, p) => s + p.amount, 0);
             fee.status = totalPaid >= fee.amount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Pending');
@@ -482,6 +552,184 @@ router.delete('/documents/:id', auth, requirePermission('students.manage'), asyn
         res.json({ success: true, message: 'Document deleted' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+
+// ============ FINANCE / DCR (Superadmin only) ============
+function superCheck(req, res) {
+    if (req.admin.role !== 'superadmin') {
+        res.status(403).json({ success: false, message: 'Superadmin only' });
+        return false;
+    }
+    return true;
+}
+
+// 1. COLLECTION REPORT — payments within a date range
+router.get('/collection-report', auth, async (req, res) => {
+    if (!superCheck(req, res)) return;
+    try {
+        const from = new Date(req.query.from);
+        from.setHours(0, 0, 0, 0);
+        const to = new Date(req.query.to);
+        to.setHours(23, 59, 59, 999);
+
+        const data = await Fee.aggregate([
+            { $unwind: '$payments' },
+            { $match: { 'payments.date': { $gte: from, $lte: to } } },
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            { $project: {
+                amount: '$payments.amount',
+                mode: '$payments.mode',
+                receiptNo: '$payments.receiptNo',
+                collectedBy: '$payments.collectedBy',
+                date: '$payments.date',
+                category: '$category',
+                feeType: '$feeType',
+                studentName: '$stu.name',
+                rollNumber: '$stu.rollNumber',
+                class: '$stu.class'
+            } },
+            { $sort: { date: -1 } }
+        ]);
+
+        const total = data.reduce((s, p) => s + p.amount, 0);
+        const byMode = {}, byCategory = {}, byStaff = {};
+        data.forEach(p => {
+            byMode[p.mode] = (byMode[p.mode] || 0) + p.amount;
+            byCategory[p.category] = (byCategory[p.category] || 0) + p.amount;
+            byStaff[p.collectedBy] = (byStaff[p.collectedBy] || 0) + p.amount;
+        });
+
+        res.json({ success: true, total, count: data.length, byMode, byCategory, byStaff, payments: data });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+
+
+
+// 2. PENDING SUMMARY — overall + per class
+router.get('/pending-summary', auth, async (req, res) => {
+    if (!superCheck(req, res)) return;
+    try {
+        const result = await Fee.aggregate([
+            { $addFields: { paid: { $sum: '$payments.amount' } } },
+            { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $match: { pending: { $gt: 0 } } },
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            { $group: { _id: '$stu.class', classPending: { $sum: '$pending' } } },
+            { $sort: { classPending: -1 } }
+        ]);
+        const totalPending = result.reduce((s, r) => s + r.classPending, 0);
+        const byClass = result.map(r => ({ class: r._id || 'Unknown', pending: r.classPending }));
+
+        // YEAR-WISE breakdown
+        const yearAgg = await Fee.aggregate([
+            { $addFields: { paid: { $sum: '$payments.amount' } } },
+            { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $match: { pending: { $gt: 0 } } },
+            { $group: { _id: '$academicYear', pending: { $sum: '$pending' } } }
+        ]);
+        // build current + last FY labels
+        const now = new Date();
+        const y = now.getFullYear();
+        // academic year starts ~April in India; if before April, current FY is (y-1)-(y)
+        const startYear = now.getMonth() >= 3 ? y : y - 1;
+        const currentFY = `${startYear}-${String(startYear + 1).slice(2)}`;
+        const lastFY = `${startYear - 1}-${String(startYear).slice(2)}`;
+
+        let current = 0, last = 0, older = 0;
+        yearAgg.forEach(r => {
+            if (r._id === currentFY) current += r.pending;
+            else if (r._id === lastFY) last += r.pending;
+            else older += r.pending; // includes "Previous Years" + any older strings
+        });
+
+        res.json({
+            success: true,
+            totalPending,
+            byClass,
+            byYear: { currentFY, current, lastFY, last, older }
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// 3. DEFAULTERS — students with dues, sorted desc, optional class filter
+router.get('/defaulters', auth, async (req, res) => {
+    if (!superCheck(req, res)) return;
+    try {
+        const pipeline = [
+            { $addFields: { paid: { $sum: '$payments.amount' } } },
+            { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $match: { pending: { $gt: 0 } } },
+            { $group: { _id: '$studentId', totalPending: { $sum: '$pending' } } },
+            { $lookup: { from: 'students', localField: '_id', foreignField: '_id', as: 'stu' } },
+            { $unwind: '$stu' }
+        ];
+        if (req.query.class) pipeline.push({ $match: { 'stu.class': req.query.class } });
+        pipeline.push(
+            { $project: {
+                name: '$stu.name', rollNumber: '$stu.rollNumber',
+                class: '$stu.class', section: '$stu.section',
+                phone: '$stu.phone', parentName: '$stu.parentName',
+                totalPending: 1
+            } },
+            { $sort: { totalPending: -1 } }
+        );
+
+        const defaulters = await Fee.aggregate(pipeline);
+        res.json({ success: true, defaulters });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// 4. TODAY'S COLLECTION — for dashboard widget
+router.get('/today-collection', auth, async (req, res) => {
+    if (!superCheck(req, res)) return;
+    try {
+        const start = new Date(); start.setHours(0, 0, 0, 0);
+        const end = new Date(); end.setHours(23, 59, 59, 999);
+        const data = await Fee.aggregate([
+            { $unwind: '$payments' },
+            { $match: { 'payments.date': { $gte: start, $lte: end } } },
+            { $group: { _id: null, total: { $sum: '$payments.amount' }, count: { $sum: 1 } } }
+        ]);
+        res.json({ success: true, total: data[0]?.total || 0, count: data[0]?.count || 0 });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+
+// Bulk promote selected students to a new class
+router.post('/students/bulk-promote', auth, requirePermission('students.manage'), async (req, res) => {
+    try {
+        const { studentIds, newClass } = req.body;
+        if (!studentIds || studentIds.length === 0 || !newClass) {
+            return res.status(400).json({ success: false, message: 'Select students and target class' });
+        }
+
+        await Student.updateMany(
+            { _id: { $in: studentIds } },
+            { $set: { class: String(newClass), section: '' } }   // section cleared
+        );
+
+        // 🔍 AUDIT
+        await logAction(req, {
+            action: `Promoted ${studentIds.length} students → Class ${newClass}`,
+            category: 'STUDENT'
+        });
+
+        res.json({ success: true, message: `${studentIds.length} students promoted to Class ${newClass}` });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
     }
 });
 

@@ -74,7 +74,7 @@ router.put('/:id', auth,requirePermission('gallery'), async (req, res) => {
             title: req.body.title,
             category: req.body.category,
             description: req.body.description
-        }, { new: true });
+        }, { returnDocument: 'after' });
         res.json({ success: true, message: 'Updated', photo });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
