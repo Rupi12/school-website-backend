@@ -13,9 +13,84 @@ const { cloudinary } = require('../config/cloudinary');
 const requirePermission = require('../middleware/permission');
 const { logAction } = require('../utils/auditLogger');   // 🔍 AUDIT
 const { generateReceipt } = require('../utils/receiptGenerator');
-
+const { generateNOC } = require('../utils/nocGenerator');
+const studentAuth = require('../middleware/studentAuth');
 
 // ---- SPECIFIC ROUTES FIRST (before :id routes) ----
+
+// Build NOC data only if ALL fees are cleared; returns null if dues pending
+async function buildNocData(studentId) {
+  const fees = await Fee.find({ studentId });
+  if (!fees.length) return null;
+
+  let grandTotal = 0;
+  let pending = 0;
+  const items = [];
+
+  for (const f of fees) {
+    const paid = f.payments.reduce((s, p) => s + (p.amount || 0), 0);
+    pending += (f.amount - paid);
+    grandTotal += paid;
+    items.push({ category: f.category, amount: f.amount, paid });
+  }
+
+  if (pending > 0) return null; // not eligible — dues pending
+
+  const student = await Student.findById(studentId).lean();
+  if (!student) return null;
+
+  return {
+    nocNo: `NOC-${student.rollNumber}-${new Date().getFullYear()}`,
+    studentName: student.name,
+    rollNumber: student.rollNumber,
+    class: student.class,
+    section: student.section,
+    academicYear: fees[0].academicYear,
+    items,
+    grandTotal,
+  };
+}
+
+// Admin: download NOC for a student (only if all dues cleared)
+router.get('/noc/:studentId', auth, async (req, res) => {
+  if (!superCheck(req, res)) return;
+  try {
+    const data = await buildNocData(req.params.studentId);
+    if (!data) return res.status(400).json({ error: 'Student has pending dues — NOC not available' });
+
+    const pdf = await generateNOC(data);
+
+    await logAction(req, {
+      action: `Generated NOC ${data.nocNo}`,
+      category: 'FEE',
+      targetName: data.studentName,
+      targetId: req.params.studentId,
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="NOC_${data.rollNumber}.pdf"`);
+    res.send(pdf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Student/parent: download own NOC (IDOR-safe — ID from JWT)
+router.get('/my-noc', studentAuth , async (req, res) => {
+  try {
+   
+    const data = await buildNocData(req.student.id);
+    if (!data) return res.status(400).json({ error: 'NOC not available — fees pending' });
+
+    const pdf = await generateNOC(data);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="NOC_${data.rollNumber}.pdf"`);
+    res.send(pdf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Download a receipt PDF for a specific payment (admin)
 router.get('/receipt/:receiptNo', auth, requirePermission('students.manage'), async (req, res) => {
