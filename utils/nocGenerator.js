@@ -45,10 +45,30 @@ async function generateNOC(data) {
   doc.rect(0, 0, W, 110).fill(NAVY);
   doc.rect(0, 110, W, 4).fill(GOLD);
   const logoPath = path.join(__dirname, '../assets/AJS_Logo.png');
-  if (fs.existsSync(logoPath)) doc.image(logoPath, M, 22, { width: 66, height: 66 });
+  if (fs.existsSync(logoPath)) {
+    try {
+      const logoR = 34;
+      const logoCx = M + logoR;
+      const logoCy = 22 + logoR;
+      
+      // Draw white circular background
+      doc.circle(logoCx, logoCy, logoR).fill('#ffffff');
+      
+      // Clip image perfectly inside the circle to remove sharp square corners
+      doc.save();
+      doc.circle(logoCx, logoCy, logoR).clip();
+      doc.image(logoPath, M, 22, { width: logoR * 2, height: logoR * 2 });
+      doc.restore();
+      
+      // Draw gold border directly over the edge for a pristine finish
+      doc.circle(logoCx, logoCy, logoR).lineWidth(1.5).stroke(GOLD);
+    } catch (e) {
+      console.error('Logo render error:', e.message);
+    }
+  }
   doc.fill('#fff').font('Helvetica-Bold').fontSize(22).text('AMAR JYOTI SCHOOL', M + 80, 30);
   doc.fill(GOLD).font('Helvetica').fontSize(10).text('Gopalgarh, Pahari (Raj.)', M + 80, 58);
-  doc.fill('#cbd5e1').fontSize(8).text('Email: Ajs.School@gmail.com   |   Phone: +91 9828603638', M + 80, 74);
+  doc.fill('#cbd5e1').fontSize(8).text('Email: amarjyotividhyapeeth150@gmail.com   |   Phone: +91 9828603638, 9828142526, 7877443404', M + 80, 74);
 
   // Title
   doc.fill(GREEN).font('Helvetica-Bold').fontSize(16).text('NO OBJECTION CERTIFICATE (FEE)', M, 134, { width: W - 2 * M, align: 'center' });
@@ -82,17 +102,36 @@ async function generateNOC(data) {
   doc.rect(M, tY, W - 2 * M, 26).fill(NAVY);
   doc.fill('#fff').font('Helvetica-Bold').fontSize(9.5);
   doc.text('FEE CATEGORY', M + 16, tY + 8);
-  doc.text('TOTAL (Rs.)', W / 2, tY + 8);
+  doc.text('TOTAL (Rs.)', W / 2 - 30, tY + 8, { width: 90, align: 'right' });
   doc.text('PAID (Rs.)', W - M - 100, tY + 8, { width: 90, align: 'right' });
 
   let rowY = tY + 26;
   data.items.forEach(it => {
-    doc.rect(M, rowY, W - 2 * M, 26).fill('#fff').stroke('#e5e7eb');
-    doc.fill('#111827').font('Helvetica').fontSize(10);
-    doc.text(`${it.category}`, M + 16, rowY + 8);
-    doc.text(inr(it.amount), W / 2, rowY + 8);
-    doc.font('Helvetica-Bold').text(inr(it.paid), W - M - 100, rowY + 8, { width: 90, align: 'right' });
-    rowY += 26;
+    if (it.discount > 0) {
+      doc.rect(M, rowY, W - 2 * M, 56).fill('#fff').stroke('#e5e7eb');
+      
+      doc.fill('#111827').font('Helvetica-Bold').fontSize(9.5);
+      doc.text(`${it.category}`, M + 16, rowY + 10);
+      doc.text(inr(it.amount), W / 2 - 30, rowY + 10, { width: 90, align: 'right' });
+      
+      doc.fill(GREEN).font('Helvetica').fontSize(8.5);
+      doc.text('Discount', M + 26, rowY + 24);
+      doc.text(`-${inr(it.discount)}`, W / 2 - 30, rowY + 24, { width: 90, align: 'right' });
+      
+      doc.fill('#111827').font('Helvetica-Bold').fontSize(9.5);
+      doc.text('Net Fee', M + 26, rowY + 38);
+      doc.text(inr(it.netAmount), W / 2 - 30, rowY + 38, { width: 90, align: 'right' });
+      
+      doc.font('Helvetica-Bold').fontSize(10).text(inr(it.paid), W - M - 100, rowY + 38, { width: 90, align: 'right' });
+      rowY += 56;
+    } else {
+      doc.rect(M, rowY, W - 2 * M, 26).fill('#fff').stroke('#e5e7eb');
+      doc.fill('#111827').font('Helvetica').fontSize(10);
+      doc.text(`${it.category}`, M + 16, rowY + 8);
+      doc.text(inr(it.amount), W / 2 - 30, rowY + 8, { width: 90, align: 'right' });
+      doc.font('Helvetica-Bold').text(inr(it.paid), W - M - 100, rowY + 8, { width: 90, align: 'right' });
+      rowY += 26;
+    }
   });
 
   // Total band

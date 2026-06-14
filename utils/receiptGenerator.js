@@ -8,7 +8,7 @@ const GOLD = '#c9a227';
 const GREY = '#6b7280';
 
 // Verification base URL (frontend route that calls /verify-receipt/:receiptNo)
-const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyoti.school/verify';
+const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyotischool.in/verify';
 
 // Reliable Indian number formatting (e.g. 1,00,000) — no locale dependency
 function inr(num) {
@@ -55,15 +55,28 @@ async function generateReceipt(data) {
   doc.rect(0, 110, W, 4).fill(GOLD);
 
   // Logo (left)
- const logoPath = path.join(__dirname, '../assets/AJS_Logo.png');
-console.log('Logo path:', logoPath, '| Exists:', fs.existsSync(logoPath));
-if (fs.existsSync(logoPath)) {
-  try {
-    doc.image(logoPath, M, 22, { width: 66, height: 66 });
-  } catch (e) {
-    console.error('Logo render error:', e.message);
+  const logoPath = path.join(__dirname, '../assets/AJS_Logo.png');
+  if (fs.existsSync(logoPath)) {
+    try {
+      const logoR = 34;
+      const logoCx = M + logoR;
+      const logoCy = 22 + logoR;
+      
+      // Draw white circular background
+      doc.circle(logoCx, logoCy, logoR).fill('#ffffff');
+      
+      // Clip image perfectly inside the circle to remove sharp square corners
+      doc.save();
+      doc.circle(logoCx, logoCy, logoR).clip();
+      doc.image(logoPath, M, 22, { width: logoR * 2, height: logoR * 2 });
+      doc.restore();
+      
+      // Draw gold border directly over the edge for a pristine finish
+      doc.circle(logoCx, logoCy, logoR).lineWidth(1.5).stroke(GOLD);
+    } catch (e) {
+      console.error('Logo render error:', e.message);
+    }
   }
-}
 
   // School name (center-left)
   doc.fill('#ffffff').font('Helvetica-Bold').fontSize(22)
@@ -71,7 +84,7 @@ if (fs.existsSync(logoPath)) {
   doc.fill(GOLD).font('Helvetica').fontSize(10)
     .text('Knowledge · Discipline · Excellence', M + 80, 58);
   doc.fill('#cbd5e1').fontSize(8)
-    .text('Email: office@amarjyoti.school   |   Affiliation No: XXXXXXX', M + 80, 74);
+    .text('Email: amarjyotividhyapeeth150@gmail.com   |   Phone: +91 9828603638, 9828142526, 7877443404', M + 80, 74);
 
   // ===== TITLE =====
   doc.fill(NAVY).font('Helvetica-Bold').fontSize(15)
@@ -103,41 +116,59 @@ if (fs.existsSync(logoPath)) {
   doc.text('PAYMENT MODE', W / 2 - 30, tY + 8);
   doc.text('AMOUNT (Rs.)', W - M - 100, tY + 8, { width: 90, align: 'right' });
 
-  const rY = tY + 26;
-  doc.rect(M, rY, W - 2 * M, 30).fill('#ffffff').stroke('#e5e7eb');
-  doc.fill('#111827').font('Helvetica').fontSize(10);
-  doc.text(`${data.category} Fee`, M + 16, rY + 10);
-  doc.text(data.mode, W / 2 - 30, rY + 10);
-  doc.font('Helvetica-Bold').text(inr(data.amount), W - M - 100, rY + 10, { width: 90, align: 'right' });
+  let rY = tY + 26;
+  let totY;
+
+  if (data.totalFee != null && data.discount > 0) {
+    doc.rect(M, rY, W - 2 * M, 60).fill('#ffffff').stroke('#e5e7eb');
+    
+    doc.fill('#111827').font('Helvetica').fontSize(10);
+    doc.text(`${data.category} Fee`, M + 16, rY + 10);
+    doc.text(data.mode, W / 2 - 30, rY + 10);
+    doc.text(inr(data.totalFee), W - M - 100, rY + 10, { width: 90, align: 'right' });
+
+    doc.fill('#15803d').font('Helvetica').fontSize(9.5);
+    doc.text(`Discount${data.discountReason ? ` (${data.discountReason})` : ''}`, M + 16, rY + 26);
+    doc.text(`-${inr(data.discount)}`, W - M - 100, rY + 26, { width: 90, align: 'right' });
+
+    doc.fill('#111827').font('Helvetica-Bold').fontSize(10);
+    doc.text(`Net Pay`, M + 16, rY + 42);
+    doc.text(inr(data.totalFee - data.discount), W - M - 100, rY + 42, { width: 90, align: 'right' });
+
+    totY = rY + 60;
+  } else {
+    doc.rect(M, rY, W - 2 * M, 30).fill('#ffffff').stroke('#e5e7eb');
+    doc.fill('#111827').font('Helvetica').fontSize(10);
+    doc.text(`${data.category} Fee`, M + 16, rY + 10);
+    doc.text(data.mode, W / 2 - 30, rY + 10);
+    doc.font('Helvetica-Bold').text(inr(data.amount), W - M - 100, rY + 10, { width: 90, align: 'right' });
+
+    totY = rY + 30;
+  }
 
   // Total band
-  const totY = rY + 30;
   doc.rect(M, totY, W - 2 * M, 30).fill('#eef2ff');
   doc.fill(NAVY).font('Helvetica-Bold').fontSize(11)
     .text('AMOUNT PAID', M + 16, totY + 9);
   doc.text(`Rs. ${inr(data.amount)}`, W - M - 120, totY + 9, { width: 110, align: 'right' });
 
-  // ===== FEE SUMMARY (optional balances) =====
-  let sY = totY + 50;
-  if (data.totalFee != null) {
-    doc.fill(GREY).font('Helvetica').fontSize(9);
-    doc.text(`Total Fee: Rs. ${inr(data.totalFee)}`, M, sY);
-    doc.text(`Paid Till Date: Rs. ${inr(data.paidTillDate || 0)}`, M, sY + 14);
-    doc.fill(Number(data.balance) > 0 ? '#b91c1c' : '#15803d').font('Helvetica-Bold')
-      .text(`Balance: Rs. ${inr(data.balance || 0)}`, M, sY + 28);
-    sY += 50;
-  }
+  // Add a generous 70px gap below the total band
+  let sY = totY + 70;
 
-  // ===== QR + VERIFICATION =====
-  const qrSize = 92;
+  // ===== BOTTOM SECTION (Seal & Signature Left | QR Right) =====
+  const qrSize = 90;
   const qrX = W - M - qrSize;
-  const qrY = sY + 10;
+  const qrY = sY;
+  
+  // QR Code (Right)
   doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
   doc.fill(GREY).font('Helvetica').fontSize(7.5)
-    .text('Scan to verify authenticity', qrX - 6, qrY + qrSize + 4, { width: qrSize + 12, align: 'center' });
+    .text('Scan to verify authenticity', qrX - 10, qrY + qrSize + 6, { width: qrSize + 20, align: 'center' });
 
-  // ===== DIGITAL SEAL (generated) =====
-  const sealX = M + 70, sealY = qrY + 46, sealR = 42;
+  // Digital Seal (Left, above signature)
+  const sealR = 40;
+  const sealX = M + 75; // Centered exactly over the 150px signature line
+  const sealY = qrY + (qrSize / 2); // Centered exactly with the QR code
   doc.save();
   doc.lineWidth(1.5).strokeOpacity(0.8);
   doc.circle(sealX, sealY, sealR).stroke(GOLD);
@@ -149,9 +180,13 @@ if (fs.existsSync(logoPath)) {
     .text('DIGITALLY GENERATED', sealX - sealR + 6, sealY + 14, { width: (sealR - 6) * 2, align: 'center' });
   doc.restore();
 
-  // Signature line
-  doc.moveTo(M, qrY + qrSize + 2).lineTo(M + 150, qrY + qrSize + 2).stroke('#9ca3af');
-  doc.fill(GREY).fontSize(8).text(`Authorized Signatory${data.collectedBy ? ' / ' + data.collectedBy : ''}`, M, qrY + qrSize + 6);
+  // Signature (Left, directly below seal)
+  const sigY = qrY + qrSize; // Aligns perfectly with the bottom edge of the QR code
+  doc.moveTo(M, sigY).lineTo(M + 150, sigY).stroke('#9ca3af');
+  doc.fill(GREY).font('Helvetica-Bold').fontSize(8.5).text('Authorized Signatory', M, sigY + 6);
+  if (data.collectedBy) {
+    doc.font('Helvetica').fontSize(7.5).text(`Cashier: ${data.collectedBy}`, M, sigY + 18);
+  }
 
   // ===== FOOTER =====
   doc.rect(0, doc.page.height - 40, W, 40).fill(NAVY);

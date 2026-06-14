@@ -10,7 +10,7 @@ const auditLogSchema = new mongoose.Schema({
     ip: { type: String, default: '' }
 }, { timestamps: true });
 
-// auto-delete logs older than 1 year (optional — keeps DB small on free tier)
-auditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 180 });
+// auto-delete logs older than 1 year (365 days)
+auditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 365 });
 
 module.exports = mongoose.model('AuditLog', auditLogSchema);

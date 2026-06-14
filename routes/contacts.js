@@ -23,7 +23,7 @@ router.post('/', formLimiter, async (req, res) => {
 });
 
 // GET - All messages (Admin only)
-router.get('/', auth, requirePermission('messages'), async (req, res) => {
+router.get('/', auth, requirePermission('messages.view'), async (req, res) => {
     try {
         const contacts = await Contact.find().sort({ createdAt: -1 });
         res.json({ 
@@ -40,7 +40,7 @@ router.get('/', auth, requirePermission('messages'), async (req, res) => {
 });
 
 // PUT - Mark as read (Admin only)
-router.put('/:id/read', auth, requirePermission('messages'), async (req, res) => {
+router.put('/:id/read', auth, requirePermission('messages.view'), async (req, res) => {
     try {
         const contact = await Contact.findByIdAndUpdate(
             req.params.id,
@@ -57,7 +57,7 @@ router.put('/:id/read', auth, requirePermission('messages'), async (req, res) =>
 });
 
 // DELETE - Remove message (Admin only)
-router.delete('/:id', auth, requirePermission('messages'), async (req, res) => {
+router.delete('/:id', auth, requirePermission('messages.delete'), async (req, res) => {
     try {
         await Contact.findByIdAndDelete(req.params.id);
         res.json({ 

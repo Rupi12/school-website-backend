@@ -32,7 +32,7 @@ router.get('/announcements', async (req, res) => {
     }
 });
 
-router.post('/', auth,requirePermission('news'), upload.single('image'), async (req, res) => {
+router.post('/', auth, requirePermission('news.add'), upload.single('image'), async (req, res) => {
     try {
         const newsData = {
             title: req.body.title,
@@ -53,7 +53,7 @@ router.post('/', auth,requirePermission('news'), upload.single('image'), async (
     }
 });
 
-router.delete('/:id', auth, requirePermission('news'),async (req, res) => {
+router.delete('/:id', auth, requirePermission('news.delete'), async (req, res) => {
     try {
         const news = await News.findById(req.params.id);
         if (!news) return res.status(404).json({ success: false, message: 'Not found' });

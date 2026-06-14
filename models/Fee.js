@@ -19,6 +19,8 @@ const feeSchema = new mongoose.Schema({
     },
     feeType: { type: String, required: true },
     amount: { type: Number, required: true },
+    discount: { type: Number, default: 0 },
+    discountReason: { type: String, default: '' },
     dueDate: { type: Date },
     status: { type: String, enum: ['Paid', 'Pending', 'Partial'], default: 'Pending' },
     payments: [paymentSchema]

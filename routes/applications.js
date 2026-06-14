@@ -26,7 +26,7 @@ router.post('/', formLimiter, async (req, res) => {
 
 
 // GET - All applications (Admin only)
-router.get('/', auth, requirePermission('applications'), async (req, res) => {
+router.get('/', auth, requirePermission('applications.view'), async (req, res) => {
     try {
         const applications = await Application.find().sort({ createdAt: -1 });
         res.json({ 
@@ -45,7 +45,7 @@ router.get('/', auth, requirePermission('applications'), async (req, res) => {
 
 
 // GET - Single application (Admin only)
-router.get('/:id', auth, requirePermission('applications'), async (req, res) => {
+router.get('/:id', auth, requirePermission('applications.view'), async (req, res) => {
     try {
         const application = await Application.findById(req.params.id);
         if (!application) {
@@ -64,7 +64,7 @@ router.get('/:id', auth, requirePermission('applications'), async (req, res) => 
 });
 
 // PUT - Update status (Admin only)
-router.put('/:id', auth, requirePermission('applications'), async (req, res) => {
+router.put('/:id', auth, requirePermission('applications.edit'), async (req, res) => {
     try {
         const application = await Application.findByIdAndUpdate(
             req.params.id,
@@ -81,7 +81,7 @@ router.put('/:id', auth, requirePermission('applications'), async (req, res) => 
 });
 
 // DELETE - Remove application (Admin only)
-router.delete('/:id', auth, requirePermission('applications'), async (req, res) => {
+router.delete('/:id', auth, requirePermission('applications.delete'), async (req, res) => {
     try {
         await Application.findByIdAndDelete(req.params.id);
         res.json({ 

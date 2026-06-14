@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST upload (Admin)
-router.post('/', auth, requirePermission('documents'), uploadDoc.single('file'), async (req, res) => {
+router.post('/', auth, requirePermission('documents.add'), uploadDoc.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
         const doc = new Document({
@@ -33,7 +33,7 @@ router.post('/', auth, requirePermission('documents'), uploadDoc.single('file'),
 });
 
 // DELETE (Admin)
-router.delete('/:id', auth, requirePermission('documents'),  async (req, res) => {
+router.delete('/:id', auth, requirePermission('documents.delete'),  async (req, res) => {
     try {
         const doc = await Document.findById(req.params.id);
         if (!doc) return res.status(404).json({ success: false, message: 'Not found' });

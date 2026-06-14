@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST - Upload photo with file (Admin only)
-router.post('/', auth, requirePermission('gallery'), upload.single('image'), async (req, res) => {
+router.post('/', auth, requirePermission('gallery.add'), upload.single('image'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ 
@@ -45,7 +45,7 @@ router.post('/', auth, requirePermission('gallery'), upload.single('image'), asy
 });
 
 // DELETE - Remove photo (Admin only)
-router.delete('/:id', auth, requirePermission('gallery'), async (req, res) => {
+router.delete('/:id', auth, requirePermission('gallery.delete'), async (req, res) => {
     try {
         const photo = await Gallery.findById(req.params.id);
         
@@ -68,7 +68,7 @@ router.delete('/:id', auth, requirePermission('gallery'), async (req, res) => {
 });
 
 
-router.put('/:id', auth,requirePermission('gallery'), async (req, res) => {
+router.put('/:id', auth, requirePermission('gallery.edit'), async (req, res) => {
     try {
         const photo = await Gallery.findByIdAndUpdate(req.params.id, {
             title: req.body.title,

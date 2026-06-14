@@ -152,12 +152,9 @@ router.put('/admins/:id/reset-password', auth, superOnly, async (req, res) => {
     }
 });
 
-// Superadmin changes own password
+// Admin changes own password
 router.put('/change-password', auth, async (req, res) => {
     try {
-        if (req.admin.role !== 'superadmin') {
-            return res.status(403).json({ success: false, message: 'Super admin only' });
-        }
         const { currentPassword, newPassword } = req.body;
         if (!currentPassword || !newPassword) {
             return res.status(400).json({ success: false, message: 'Both passwords required' });

@@ -7,6 +7,7 @@ const Attendance = require('../models/Attendance');
 const Timetable = require('../models/Timetable');
 const Fee = require('../models/Fee');
 const StudentDoc = require('../models/StudentDoc');
+const Admin = require('../models/Admin');
 const auth = require('../middleware/auth');
 const { uploadDoc } = require('../config/cloudinary');
 const { cloudinary } = require('../config/cloudinary');
@@ -14,7 +15,18 @@ const requirePermission = require('../middleware/permission');
 const { logAction } = require('../utils/auditLogger');   // 🔍 AUDIT
 const { generateReceipt } = require('../utils/receiptGenerator');
 const { generateNOC } = require('../utils/nocGenerator');
+const { generateReportCard } = require('../utils/reportCardGenerator');
 const studentAuth = require('../middleware/studentAuth');
+
+
+// Helper middleware to allow access if user has ANY student-related permission
+function anyStudentPerm(req, res, next) {
+    if (req.admin.role === 'superadmin') return next();
+    const p = req.admin.permissions || [];
+    const valid = ['students.view', 'students.add', 'students.edit', 'students.delete', 'students.export', 'results.manage', 'fees.manage', 'attendance.manage', 'timetable.manage', 'studentdocs.manage'];
+    if (valid.some(v => p.includes(v))) return next();
+    return res.status(403).json({ success: false, message: 'Permission denied' });
+}
 
 // ---- SPECIFIC ROUTES FIRST (before :id routes) ----
 
@@ -29,9 +41,10 @@ async function buildNocData(studentId) {
 
   for (const f of fees) {
     const paid = f.payments.reduce((s, p) => s + (p.amount || 0), 0);
-    pending += (f.amount - paid);
+    const netAmount = f.amount - (f.discount || 0);
+    pending += (netAmount - paid);
     grandTotal += paid;
-    items.push({ category: f.category, amount: f.amount, paid });
+    items.push({ category: f.category, amount: f.amount, discount: f.discount || 0, netAmount, paid });
   }
 
   if (pending > 0) return null; // not eligible — dues pending
@@ -52,8 +65,7 @@ async function buildNocData(studentId) {
 }
 
 // Admin: download NOC for a student (only if all dues cleared)
-router.get('/noc/:studentId', auth, async (req, res) => {
-  if (!superCheck(req, res)) return;
+router.get('/noc/:studentId', auth, requirePermission('fees.manage'), async (req, res) => {
   try {
     const data = await buildNocData(req.params.studentId);
     if (!data) return res.status(400).json({ error: 'Student has pending dues — NOC not available' });
@@ -93,16 +105,22 @@ router.get('/my-noc', studentAuth , async (req, res) => {
 });
 
 // Download a receipt PDF for a specific payment (admin)
-router.get('/receipt/:receiptNo', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/receipt/:receiptNo', auth, requirePermission('fees.manage'), async (req, res) => {
   try {
     const fee = await Fee.findOne({ 'payments.receiptNo': req.params.receiptNo });
     if (!fee) return res.status(404).json({ error: 'Receipt not found' });
 
-    const payment = fee.payments.find(p => p.receiptNo === req.params.receiptNo);
+    const payment = fee.payments.find(p => String(p.receiptNo) === String(req.params.receiptNo));
+    if (!payment) return res.status(404).json({ error: 'Payment not found' });
     const student = await Student.findById(fee.studentId).lean();
     if (!student) return res.status(404).json({ error: 'Student not found' });
 
-    const paidTillDate = fee.payments.reduce((s, p) => s + (p.amount || 0), 0);
+    // Calculate accurately up to THIS specific payment, not future ones
+    let paidTillDate = 0;
+    for (const p of fee.payments) {
+      paidTillDate += (p.amount || 0);
+      if (String(p.receiptNo) === String(req.params.receiptNo)) break;
+    }
 
     const pdf = await generateReceipt({
       receiptNo: payment.receiptNo,
@@ -117,8 +135,10 @@ router.get('/receipt/:receiptNo', auth, requirePermission('students.manage'), as
       date: payment.date,
       collectedBy: payment.collectedBy,
       totalFee: fee.amount,
+      discount: fee.discount || 0,
+      discountReason: fee.discountReason || '',
       paidTillDate,
-      balance: (fee.amount || 0) - paidTillDate,
+      balance: ((fee.amount || 0) - (fee.discount || 0)) - paidTillDate,
     });
 
     await logAction(req, {
@@ -141,7 +161,7 @@ router.get('/verify-receipt/:receiptNo', async (req, res) => {
     const fee = await Fee.findOne({ 'payments.receiptNo': req.params.receiptNo }).lean();
     if (!fee) return res.json({ valid: false });
 
-    const payment = fee.payments.find(p => p.receiptNo === req.params.receiptNo);
+    const payment = fee.payments.find(p => String(p.receiptNo) === String(req.params.receiptNo));
     const student = await Student.findById(fee.studentId).select('name class section').lean();
 
     res.json({
@@ -152,6 +172,7 @@ router.get('/verify-receipt/:receiptNo', async (req, res) => {
       category: fee.category,
       academicYear: fee.academicYear,
       amount: payment.amount,
+      discount: fee.discount || 0,
       date: payment.date,
     });
   } catch (err) {
@@ -160,12 +181,12 @@ router.get('/verify-receipt/:receiptNo', async (req, res) => {
 });
 
 
-// Get students by class
-router.get('/students/class/:class', auth, requirePermission('students.manage'), async (req, res) => {
+/// Get students by class
+router.get('/students/class/:class', auth, anyStudentPerm, async (req, res) => {
     try {
         const query = { class: req.params.class };
         if (req.query.section) query.section = req.query.section;
-        const students = await Student.find(query).select('-password').sort({ rollNumber: 1 });
+        const students = await Student.find(query).select('-password').collation({ locale: "en_US", numericOrdering: true }).sort({ rollNumber: 1 });
         res.json({ success: true, students });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -173,17 +194,17 @@ router.get('/students/class/:class', auth, requirePermission('students.manage'),
 });
 
 // Get unique class list
-router.get('/classes', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/classes', auth, anyStudentPerm, async (req, res) => {
     try {
         const classes = await Student.distinct('class');
-        res.json({ success: true, classes: classes.sort() });
+        res.json({ success: true, classes: classes.sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true })) });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 // Get existing attendance for class + date
-router.get('/attendance/check', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/attendance/check', auth, requirePermission('attendance.manage'), async (req, res) => {
     try {
         const { class: cls, date } = req.query;
         const day = new Date(date);
@@ -194,7 +215,7 @@ router.get('/attendance/check', auth, requirePermission('students.manage'), asyn
         const ids = students.map(s => s._id);
         const records = await Attendance.find({ studentId: { $in: ids }, date: { $gte: day, $lt: nextDay } });
         const map = {};
-        records.forEach(r => map[r.studentId] = r.status);
+        records.forEach(r => map[r.studentId] = { status: r.status, remarks: r.remarks });
         res.json({ success: true, existing: map });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -202,7 +223,7 @@ router.get('/attendance/check', auth, requirePermission('students.manage'), asyn
 });
 
 // Get student's results/fees/docs
-router.get('/student-data/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/student-data/:id', auth, anyStudentPerm, async (req, res) => {
     try {
         const results = await Result.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const fees = await Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 });
@@ -214,38 +235,58 @@ router.get('/student-data/:id', auth, requirePermission('students.manage'), asyn
 });
 
 // Bulk attendance
-router.post('/attendance/bulk', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/attendance/bulk', auth, requirePermission('attendance.manage'), async (req, res) => {
     try {
         const { date, records } = req.body;
         const day = new Date(date);
         day.setHours(0,0,0,0);
         const nextDay = new Date(day);
         nextDay.setDate(day.getDate() + 1);
-        let updated = 0, created = 0;
+        let updated = 0, created = 0, skipped = 0;
+        
+        const isSuperadmin = req.admin.role === 'superadmin';
+
         for (const r of records) {
             const existing = await Attendance.findOne({ studentId: r.studentId, date: { $gte: day, $lt: nextDay } });
             if (existing) {
+                if (!isSuperadmin) {
+                    skipped++;
+                    continue; // Skip updating if not superadmin
+                }
                 existing.status = r.status;
+                existing.remarks = r.remarks || '';
                 await existing.save();
                 updated++;
             } else {
-                await new Attendance({ studentId: r.studentId, date: day, status: r.status }).save();
+                await new Attendance({ studentId: r.studentId, date: day, status: r.status, remarks: r.remarks || '', markedBy: req.admin.username }).save();
                 created++;
             }
         }
-        res.json({ success: true, message: `Marked: ${created} new, ${updated} updated` });
+        
+        let msg = `Marked: ${created} new.`;
+        if (updated > 0) msg += ` ${updated} updated.`;
+        if (skipped > 0) msg += ` ${skipped} skipped (already marked).`;
+        
+        res.json({ success: true, message: msg });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
 });
 
 // Bulk assign DUES to a class (legacy — no academicYear)
-router.post('/fees/bulk', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/fees/bulk', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
-        const { class: cls, section, academicYear, category, feeType, amount, dueDate } = req.body;
+        const { class: cls, section, academicYear, category, feeType, amount, discount, discountReason, dueDate } = req.body;
         if (!cls || !feeType || !amount) {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
+
+        const validAmt = Number(amount);
+        const validDisc = Number(discount) || 0;
+        if (isNaN(validAmt) || validAmt <= 0 || validDisc < 0 || validDisc > validAmt) {
+            return res.status(400).json({ success: false, message: 'Invalid fee amount or discount. Discount cannot exceed total amount.' });
+        }
+
         const query = { class: cls };
         if (section) query.section = section;
         const students = await Student.find(query).select('_id');
@@ -257,7 +298,9 @@ router.post('/fees/bulk', auth, requirePermission('students.manage'), async (req
             academicYear: academicYear || '',
             category: category || 'Other',
             feeType,
-            amount: Number(amount),
+            amount: validAmt,
+            discount: validDisc,
+            discountReason: discountReason || '',
             dueDate: dueDate || null,
             status: 'Pending'
         }));
@@ -276,12 +319,12 @@ router.post('/fees/bulk', auth, requirePermission('students.manage'), async (req
 });
 
 // ---- STUDENTS ----
-router.get('/students', auth, requirePermission('students.list'), async (req, res) => {
-    const students = await Student.find().select('-password').sort({ createdAt: -1 });
+router.get('/students', auth, anyStudentPerm, async (req, res) => {
+    const students = await Student.find().select('-password').collation({ locale: "en_US", numericOrdering: true }).sort({ class: 1, rollNumber: 1 });
     res.json({ success: true, students });
 });
 
-router.post('/students', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/students', auth, requirePermission('students.add'), async (req, res) => {
     try {
         const { name, rollNumber, password, class: cls, section, parentName, phone, email } = req.body;
         const exists = await Student.findOne({ rollNumber });
@@ -295,9 +338,15 @@ router.post('/students', auth, requirePermission('students.manage'), async (req,
     }
 });
 
-router.put('/students/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.put('/students/:id', auth, requirePermission('students.edit'), async (req, res) => {
     try {
         const { name, rollNumber, class: cls, section, parentName, phone } = req.body;
+        
+        const existing = await Student.findOne({ rollNumber, _id: { $ne: req.params.id } });
+        if (existing) {
+            return res.status(400).json({ success: false, message: `Roll number ${rollNumber} is already assigned to another student!` });
+        }
+
         const student = await Student.findByIdAndUpdate(
             req.params.id,
             { name, rollNumber, class: cls, section, parentName, phone },
@@ -309,12 +358,24 @@ router.put('/students/:id', auth, requirePermission('students.manage'), async (r
     }
 });
 
-router.delete('/students/:id', auth, requirePermission('students.list'), async (req, res) => {
+router.delete('/students/:id', auth, requirePermission('students.delete'), async (req, res) => {
     const stu = await Student.findById(req.params.id).select('name rollNumber');
     await Student.findByIdAndDelete(req.params.id);
     await Result.deleteMany({ studentId: req.params.id });
     await Attendance.deleteMany({ studentId: req.params.id });
     await Fee.deleteMany({ studentId: req.params.id });
+    
+    // Safely remove files from Cloudinary to prevent storage leaks
+    const docs = await StudentDoc.find({ studentId: req.params.id });
+    for (const doc of docs) {
+        if (doc.cloudinaryId) {
+            const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId, studentId: { $ne: req.params.id } });
+            if (!otherUsage) {
+                await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+            }
+        }
+    }
+
     await StudentDoc.deleteMany({ studentId: req.params.id });
 
     // 🔍 AUDIT
@@ -328,8 +389,100 @@ router.delete('/students/:id', auth, requirePermission('students.list'), async (
     res.json({ success: true, message: 'Student deleted' });
 });
 
+// Bulk delete selected students (Superadmin Only)
+router.post('/students/bulk-delete', auth, async (req, res) => {
+    try {
+        if (req.admin.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Superadmin permission required' });
+        }
+        
+        const { studentIds, password } = req.body;
+        if (!studentIds || !studentIds.length || !password) {
+            return res.status(400).json({ success: false, message: 'Missing students or password' });
+        }
+
+        const admin = await Admin.findById(req.admin.id);
+        const isMatch = await bcrypt.compare(password, admin.password);
+        if (!isMatch) {
+            return res.status(401).json({ success: false, message: 'Incorrect superadmin password' });
+        }
+
+        // Clean up related data first
+        await Result.deleteMany({ studentId: { $in: studentIds } });
+        await Attendance.deleteMany({ studentId: { $in: studentIds } });
+        await Fee.deleteMany({ studentId: { $in: studentIds } });
+        
+        const docs = await StudentDoc.find({ studentId: { $in: studentIds } });
+        for (const doc of docs) {
+            if (doc.cloudinaryId) {
+                const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId, studentId: { $nin: studentIds } });
+                if (!otherUsage) {
+                    await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+                }
+            }
+        }
+        await StudentDoc.deleteMany({ studentId: { $in: studentIds } });
+
+        // Finally delete the students
+        await Student.deleteMany({ _id: { $in: studentIds } });
+
+        await logAction(req, { action: `Bulk deleted ${studentIds.length} students & all related data`, category: 'STUDENT' });
+
+        res.json({ success: true, message: `Successfully deleted ${studentIds.length} students.` });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
 // ---- RESULTS ----
-router.post('/results', auth, requirePermission('students.manage'), async (req, res) => {
+
+router.get('/results/:id/pdf', auth, requirePermission('results.manage'), async (req, res) => {
+    try {
+        const result = await Result.findById(req.params.id);
+        if (!result) return res.status(404).json({ error: 'Result not found' });
+        
+        const student = await Student.findById(result.studentId);
+        if (!student) return res.status(404).json({ error: 'Student not found' });
+        
+        const pdf = await generateReportCard({ student, result });
+        
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="ReportCard_${student.rollNumber}.pdf"`);
+        res.send(pdf);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Bulk assign results
+router.post('/results/bulk', auth, requirePermission('results.manage'), async (req, res) => {
+    try {
+        const { examName, term, academicYear, examDate, records } = req.body;
+        if (!examName || !academicYear || !records || records.length === 0) {
+            return res.status(400).json({ success: false, message: 'Missing required fields or records' });
+        }
+
+        let count = 0;
+        for (const rec of records) {
+            if (!rec.subjects || rec.subjects.length === 0) continue;
+            
+            // Upsert prevents duplicates for the same exam
+            await Result.findOneAndUpdate(
+                { studentId: rec.studentId, examName, term, academicYear },
+                { examDate, subjects: rec.subjects, remark: '' },
+                { upsert: true, new: true }
+            );
+            count++;
+        }
+
+        await logAction(req, { action: `Bulk saved results for "${examName}" (${count} students)`, category: 'STUDENT' });
+        res.json({ success: true, message: `Successfully saved results for ${count} students` });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+router.post('/results', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const { studentId, examName, term, academicYear, examDate, subjects, remark } = req.body;
         if (!studentId || !examName || !academicYear) {
@@ -355,7 +508,7 @@ router.post('/results', auth, requirePermission('students.manage'), async (req, 
     }
 });
 
-router.get('/results/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const result = await Result.findById(req.params.id);
         res.json({ success: true, result });
@@ -364,7 +517,7 @@ router.get('/results/:id', auth, requirePermission('students.manage'), async (re
     }
 });
 
-router.put('/results/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.put('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const { examName, term, academicYear, examDate, subjects, remark } = req.body;
         const result = await Result.findByIdAndUpdate(
@@ -378,7 +531,7 @@ router.put('/results/:id', auth, requirePermission('students.manage'), async (re
     }
 });
 
-router.delete('/results/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.delete('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         await Result.findByIdAndDelete(req.params.id);
         res.json({ success: true, message: 'Result deleted' });
@@ -388,20 +541,24 @@ router.delete('/results/:id', auth, requirePermission('students.manage'), async 
 });
 
 // ---- ATTENDANCE ----
-router.post('/attendance', auth, requirePermission('students.bulk'), async (req, res) => {
+router.post('/attendance', auth, requirePermission('attendance.manage'), async (req, res) => {
     try {
-        const { studentId, date, status } = req.body;
+        const { studentId, date, status, remarks } = req.body;
         const day = new Date(date);
         day.setHours(0,0,0,0);
         const nextDay = new Date(day);
         nextDay.setDate(day.getDate() + 1);
         const existing = await Attendance.findOne({ studentId, date: { $gte: day, $lt: nextDay } });
         if (existing) {
+            if (req.admin.role !== 'superadmin') {
+                return res.status(403).json({ success: false, message: 'Attendance already marked. Only Superadmin can edit.' });
+            }
             existing.status = status;
+            existing.remarks = remarks || '';
             await existing.save();
             return res.json({ success: true, message: 'Attendance updated' });
         }
-        await new Attendance({ studentId, date: day, status }).save();
+        await new Attendance({ studentId, date: day, status, remarks: remarks || '', markedBy: req.admin.username }).save();
         res.status(201).json({ success: true, message: 'Attendance marked' });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
@@ -409,7 +566,16 @@ router.post('/attendance', auth, requirePermission('students.bulk'), async (req,
 });
 
 // ---- TIMETABLE ----
-router.post('/timetable', auth, requirePermission('students.manage'), async (req, res) => {
+router.get('/timetable', auth, requirePermission('timetable.manage'), async (req, res) => {
+    try {
+        const tt = await Timetable.findOne({ class: req.query.class, section: req.query.section || '' });
+        res.json({ success: true, timetable: tt });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+});
+
+router.post('/timetable', auth, requirePermission('timetable.manage'), async (req, res) => {
     try {
         const tt = await Timetable.findOneAndUpdate(
             { class: req.body.class, section: req.body.section || '' },
@@ -425,13 +591,20 @@ router.post('/timetable', auth, requirePermission('students.manage'), async (req
 // ---- FEES ----
 
 // Add single fee (due)
-router.post('/fees', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/fees', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
-        const { studentId, academicYear, category, feeType, amount, dueDate } = req.body;
+        const { studentId, academicYear, category, feeType, amount, discount, discountReason, dueDate } = req.body;
         if (!studentId || !academicYear || !feeType || !amount) {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
-        const fee = new Fee({ studentId, academicYear, category, feeType, amount, dueDate });
+        
+        const validAmt = Number(amount);
+        const validDisc = Number(discount) || 0;
+        if (isNaN(validAmt) || validAmt <= 0 || validDisc < 0 || validDisc > validAmt) {
+            return res.status(400).json({ success: false, message: 'Invalid fee amount or discount. Discount cannot exceed total amount.' });
+        }
+
+        const fee = new Fee({ studentId, academicYear, category, feeType, amount: validAmt, discount: validDisc, discountReason: discountReason || '', dueDate });
         await fee.save();
         res.status(201).json({ success: true, message: 'Fee due added' });
     } catch (error) {
@@ -440,14 +613,22 @@ router.post('/fees', auth, requirePermission('students.manage'), async (req, res
 });
 
 // Edit fee details
-router.patch('/fees/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.patch('/fees/:id', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
-        const { academicYear, feeType, amount, category, dueDate } = req.body;
+        const { academicYear, feeType, amount, discount, discountReason, category, dueDate } = req.body;
+        
+        const validAmt = Number(amount);
+        const validDisc = Number(discount) || 0;
+        if (isNaN(validAmt) || validAmt <= 0 || validDisc < 0 || validDisc > validAmt) {
+            return res.status(400).json({ success: false, message: 'Invalid fee amount or discount. Discount cannot exceed total amount.' });
+        }
+
         const fee = await Fee.findByIdAndUpdate(req.params.id,
-            { academicYear, feeType, amount, category, dueDate }, { returnDocument: 'after' });
+            { academicYear, feeType, amount: validAmt, discount: validDisc, discountReason, category, dueDate }, { returnDocument: 'after' });
         if (fee) {
             const totalPaid = fee.payments.reduce((s, p) => s + p.amount, 0);
-            fee.status = totalPaid >= fee.amount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Pending');
+            const netAmount = fee.amount - (fee.discount || 0);
+            fee.status = totalPaid >= netAmount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Pending');
             await fee.save();
 
             // 🔍 AUDIT
@@ -464,21 +645,39 @@ router.patch('/fees/:id', auth, requirePermission('students.manage'), async (req
 });
 
 // Record payment (installment)
-router.post('/fees/:id/pay', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/fees/:id/pay', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const { amount, mode, receiptNo, remarks, date, collectedBy } = req.body;
+        
+        const safeReceiptNo = receiptNo ? String(receiptNo).trim() : '';
+        if (!safeReceiptNo) {
+            return res.status(400).json({ success: false, message: 'Receipt number is required' });
+        }
+
+        // Lock duplicate receipt numbers
+        const existingReceipt = await Fee.findOne({ 'payments.receiptNo': safeReceiptNo });
+        if (existingReceipt) {
+            return res.status(400).json({ success: false, message: `Receipt number "${safeReceiptNo}" is already in use!` });
+        }
+
+        const validPayAmt = Number(amount);
+        if (isNaN(validPayAmt) || validPayAmt <= 0) {
+            return res.status(400).json({ success: false, message: 'Payment amount must be greater than zero' });
+        }
+
         const fee = await Fee.findById(req.params.id);
         if (!fee) return res.status(404).json({ success: false, message: 'Fee not found' });
 
         fee.payments.push({
-            amount: Number(amount), mode, receiptNo,
+            amount: validPayAmt, mode, receiptNo: safeReceiptNo,
             collectedBy: collectedBy || req.admin.username,
             remarks: remarks || '',
             date: date ? new Date(date) : new Date()
         });
 
         const totalPaid = fee.payments.reduce((s, p) => s + p.amount, 0);
-        fee.status = totalPaid >= fee.amount ? 'Paid' : 'Partial';
+        const netAmount = fee.amount - (fee.discount || 0);
+        fee.status = totalPaid >= netAmount ? 'Paid' : 'Partial';
         await fee.save();
 
         // 🔍 AUDIT
@@ -497,13 +696,14 @@ router.post('/fees/:id/pay', auth, requirePermission('students.manage'), async (
 });
 
 // Delete a specific payment
-router.delete('/fees/:feeId/pay/:paymentId', auth, requirePermission('students.manage'), async (req, res) => {
+router.delete('/fees/:feeId/pay/:paymentId', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.feeId);
         if (!fee) return res.status(404).json({ success: false, message: 'Fee not found' });
         fee.payments = fee.payments.filter(p => p._id.toString() !== req.params.paymentId);
         const totalPaid = fee.payments.reduce((s, p) => s + p.amount, 0);
-        fee.status = totalPaid >= fee.amount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Pending');
+        const netAmount = fee.amount - (fee.discount || 0);
+        fee.status = totalPaid >= netAmount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Pending');
         await fee.save();
 
         // 🔍 AUDIT
@@ -522,7 +722,7 @@ router.delete('/fees/:feeId/pay/:paymentId', auth, requirePermission('students.m
 });
 
 // Delete entire fee
-router.delete('/fees/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.delete('/fees/:id', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.id);
         await Fee.findByIdAndDelete(req.params.id);
@@ -543,18 +743,27 @@ router.delete('/fees/:id', auth, requirePermission('students.manage'), async (re
 });
 
 // Bulk assign dues to SELECTED students
-router.post('/fees/bulk-selected', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/fees/bulk-selected', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
-        const { studentIds, academicYear, category, feeType, amount, dueDate } = req.body;
+        const { studentIds, academicYear, category, feeType, amount, discount, discountReason, dueDate } = req.body;
         if (!studentIds || studentIds.length === 0 || !feeType || !amount || !academicYear) {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
+        
+        const validAmt = Number(amount);
+        const validDisc = Number(discount) || 0;
+        if (isNaN(validAmt) || validAmt <= 0 || validDisc < 0 || validDisc > validAmt) {
+            return res.status(400).json({ success: false, message: 'Invalid fee amount or discount. Discount cannot exceed total amount.' });
+        }
+
         const fees = studentIds.map(id => ({
             studentId: id,
             academicYear,
             category: category || 'Other',
             feeType,
-            amount: Number(amount),
+            amount: validAmt,
+            discount: validDisc,
+            discountReason: discountReason || '',
             dueDate: dueDate || null,
             status: 'Pending'
         }));
@@ -573,7 +782,7 @@ router.post('/fees/bulk-selected', auth, requirePermission('students.manage'), a
 });
 
 // ---- STUDENT DOCUMENTS ----
-router.post('/documents', auth, requirePermission('students.manage'), uploadDoc.single('file'), async (req, res) => {
+router.post('/documents', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
         const doc = new StudentDoc({
@@ -589,7 +798,38 @@ router.post('/documents', auth, requirePermission('students.manage'), uploadDoc.
     }
 });
 
-router.get('/documents/:id', auth, requirePermission('students.manage'), async (req, res) => {
+// Bulk upload document to selected students
+router.post('/documents/bulk', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+        
+        let studentIds;
+        try { studentIds = JSON.parse(req.body.studentIds); } 
+        catch (e) { return res.status(400).json({ success: false, message: 'Invalid student list format' }); }
+
+        if (!studentIds || studentIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'No students selected' });
+        }
+
+        const docsToInsert = studentIds.map(id => ({
+            studentId: id, title: req.body.title,
+            fileUrl: req.file.path, cloudinaryId: req.file.filename
+        }));
+
+        await StudentDoc.insertMany(docsToInsert);
+        
+        await logAction(req, {
+            action: `Bulk uploaded doc "${req.body.title}" to ${studentIds.length} students`,
+            category: 'STUDENT'
+        });
+
+        res.status(201).json({ success: true, message: `Document assigned to ${studentIds.length} students` });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+router.get('/documents/:id', auth, requirePermission('studentdocs.manage'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         res.json({ success: true, document: doc });
@@ -598,7 +838,7 @@ router.get('/documents/:id', auth, requirePermission('students.manage'), async (
     }
 });
 
-router.put('/documents/:id', auth, requirePermission('students.manage'), uploadDoc.single('file'), async (req, res) => {
+router.put('/documents/:id', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
@@ -617,11 +857,14 @@ router.put('/documents/:id', auth, requirePermission('students.manage'), uploadD
     }
 });
 
-router.delete('/documents/:id', auth, requirePermission('students.manage'), async (req, res) => {
+router.delete('/documents/:id', auth, requirePermission('studentdocs.manage'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (doc && doc.cloudinaryId) {
-            await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+            const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId, _id: { $ne: req.params.id } });
+            if (!otherUsage) {
+                await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+            }
         }
         await StudentDoc.findByIdAndDelete(req.params.id);
         res.json({ success: true, message: 'Document deleted' });
@@ -631,18 +874,10 @@ router.delete('/documents/:id', auth, requirePermission('students.manage'), asyn
 });
 
 
-// ============ FINANCE / DCR (Superadmin only) ============
-function superCheck(req, res) {
-    if (req.admin.role !== 'superadmin') {
-        res.status(403).json({ success: false, message: 'Superadmin only' });
-        return false;
-    }
-    return true;
-}
+// ============ FINANCE / DCR (Permission Based) ============
 
-// 1. COLLECTION REPORT — payments within a date range
-router.get('/collection-report', auth, async (req, res) => {
-    if (!superCheck(req, res)) return;
+// 1. COLLECTION REPORT
+router.get('/collection-report', auth, requirePermission('reports.view'), async (req, res) => {
     try {
         const from = new Date(req.query.from);
         from.setHours(0, 0, 0, 0);
@@ -687,12 +922,14 @@ router.get('/collection-report', auth, async (req, res) => {
 
 
 // 2. PENDING SUMMARY — overall + per class
-router.get('/pending-summary', auth, async (req, res) => {
-    if (!superCheck(req, res)) return;
+router.get('/pending-summary', auth, requirePermission('reports.view'), async (req, res) => {
     try {
         const result = await Fee.aggregate([
             { $addFields: { paid: { $sum: '$payments.amount' } } },
             { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
             { $match: { pending: { $gt: 0 } } },
             { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
             { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
@@ -706,6 +943,9 @@ router.get('/pending-summary', auth, async (req, res) => {
         const yearAgg = await Fee.aggregate([
             { $addFields: { paid: { $sum: '$payments.amount' } } },
             { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
             { $match: { pending: { $gt: 0 } } },
             { $group: { _id: '$academicYear', pending: { $sum: '$pending' } } }
         ]);
@@ -736,12 +976,14 @@ router.get('/pending-summary', auth, async (req, res) => {
 });
 
 // 3. DEFAULTERS — students with dues, sorted desc, optional class filter
-router.get('/defaulters', auth, async (req, res) => {
-    if (!superCheck(req, res)) return;
+router.get('/defaulters', auth, requirePermission('reports.view'), async (req, res) => {
     try {
         const pipeline = [
             { $addFields: { paid: { $sum: '$payments.amount' } } },
             { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+            { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
             { $match: { pending: { $gt: 0 } } },
             { $group: { _id: '$studentId', totalPending: { $sum: '$pending' } } },
             { $lookup: { from: 'students', localField: '_id', foreignField: '_id', as: 'stu' } },
@@ -766,8 +1008,7 @@ router.get('/defaulters', auth, async (req, res) => {
 });
 
 // 4. TODAY'S COLLECTION — for dashboard widget
-router.get('/today-collection', auth, async (req, res) => {
-    if (!superCheck(req, res)) return;
+router.get('/today-collection', auth, requirePermission('reports.view'), async (req, res) => {
     try {
         const start = new Date(); start.setHours(0, 0, 0, 0);
         const end = new Date(); end.setHours(23, 59, 59, 999);
@@ -784,7 +1025,7 @@ router.get('/today-collection', auth, async (req, res) => {
 
 
 // Bulk promote selected students to a new class
-router.post('/students/bulk-promote', auth, requirePermission('students.manage'), async (req, res) => {
+router.post('/students/bulk-promote', auth, requirePermission('students.edit'), async (req, res) => {
     try {
         const { studentIds, newClass } = req.body;
         if (!studentIds || studentIds.length === 0 || !newClass) {

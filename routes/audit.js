@@ -2,12 +2,10 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');        // matches your other routes?
 const AuditLog = require('../models/AuditLog');
+const requirePermission = require('../middleware/permission');
 
-// Superadmin-only audit log viewer with pagination + filters
-router.get('/', auth, async (req, res) => {
-    if (req.admin.role !== 'superadmin') {
-        return res.status(403).json({ success: false, message: 'Superadmin only' });
-    }
+// Audit log viewer with pagination + filters
+router.get('/', auth, requirePermission('audit.view'), async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = 30;
