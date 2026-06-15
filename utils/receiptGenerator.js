@@ -8,7 +8,7 @@ const GOLD = '#c9a227';
 const GREY = '#6b7280';
 
 // Verification base URL (frontend route that calls /verify-receipt/:receiptNo)
-const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyotischool.in/verify';
+const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyotischool.in/verify.html?id=';
 
 // Reliable Indian number formatting (e.g. 1,00,000) — no locale dependency
 function inr(num) {
@@ -44,7 +44,7 @@ async function generateReceipt(data) {
   const M = 40;               // content margin
 
   // --- QR code (verification link) ---
-  const verifyUrl = `${VERIFY_BASE}/${encodeURIComponent(data.receiptNo)}`;
+  const verifyUrl = `${VERIFY_BASE}${encodeURIComponent(data.receiptNo)}`;
   const qrDataUrl = await QRCode.toDataURL(verifyUrl, {
     margin: 1, width: 220, color: { dark: NAVY, light: '#ffffff' },
   });

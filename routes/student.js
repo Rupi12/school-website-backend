@@ -118,6 +118,29 @@ router.get('/documents', studentAuth, async (req, res) => {
     res.json({ success: true, documents: docs });
 });
 
+// Student changes own password
+router.put('/change-password', studentAuth, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Both passwords required' });
+        }
+        if (newPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+        }
+        const student = await Student.findById(req.student.id);
+        const isMatch = await student.comparePassword(currentPassword);
+        if (!isMatch) {
+            return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+        }
+        student.password = await bcrypt.hash(newPassword, 10);
+        await student.save();
+
+        res.json({ success: true, message: 'Password changed successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
 
 
 // ==========================================

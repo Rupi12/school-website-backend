@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const Student = require('../models/Student');
 const Result = require('../models/Result');
@@ -8,6 +9,8 @@ const Timetable = require('../models/Timetable');
 const Fee = require('../models/Fee');
 const StudentDoc = require('../models/StudentDoc');
 const Admin = require('../models/Admin');
+const Payroll = require('../models/Payroll');
+const StaffAttendance = require('../models/StaffAttendance');
 const auth = require('../middleware/auth');
 const { uploadDoc } = require('../config/cloudinary');
 const { cloudinary } = require('../config/cloudinary');
@@ -15,6 +18,7 @@ const requirePermission = require('../middleware/permission');
 const { logAction } = require('../utils/auditLogger');   // 🔍 AUDIT
 const { generateReceipt } = require('../utils/receiptGenerator');
 const { generateNOC } = require('../utils/nocGenerator');
+const { generateSalarySlip } = require('../utils/salarySlipGenerator');
 const { generateReportCard } = require('../utils/reportCardGenerator');
 const studentAuth = require('../middleware/studentAuth');
 
@@ -320,8 +324,42 @@ router.post('/fees/bulk', auth, requirePermission('fees.manage'), async (req, re
 
 // ---- STUDENTS ----
 router.get('/students', auth, anyStudentPerm, async (req, res) => {
-    const students = await Student.find().select('-password').collation({ locale: "en_US", numericOrdering: true }).sort({ class: 1, rollNumber: 1 });
-    res.json({ success: true, students });
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const search = req.query.search || '';
+        const classFilter = req.query.class || '';
+
+        const query = {};
+        if (classFilter) query.class = classFilter;
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { rollNumber: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const total = await Student.countDocuments(query);
+        const students = await Student.find(query)
+            .select('-password')
+            .collation({ locale: "en_US", numericOrdering: true })
+            .sort({ class: 1, rollNumber: 1 })
+            .skip((page - 1) * limit)
+            .limit(limit);
+
+        res.json({ success: true, students, total, page, pages: Math.ceil(total / limit) });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+router.get('/students-export', auth, requirePermission('students.export'), async (req, res) => {
+    try {
+        const students = await Student.find().select('-password').sort({ class: 1, rollNumber: 1 });
+        res.json({ success: true, students });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 router.post('/students', auth, requirePermission('students.add'), async (req, res) => {
@@ -359,34 +397,40 @@ router.put('/students/:id', auth, requirePermission('students.edit'), async (req
 });
 
 router.delete('/students/:id', auth, requirePermission('students.delete'), async (req, res) => {
-    const stu = await Student.findById(req.params.id).select('name rollNumber');
-    await Student.findByIdAndDelete(req.params.id);
-    await Result.deleteMany({ studentId: req.params.id });
-    await Attendance.deleteMany({ studentId: req.params.id });
-    await Fee.deleteMany({ studentId: req.params.id });
-    
-    // Safely remove files from Cloudinary to prevent storage leaks
-    const docs = await StudentDoc.find({ studentId: req.params.id });
-    for (const doc of docs) {
-        if (doc.cloudinaryId) {
-            const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId, studentId: { $ne: req.params.id } });
-            if (!otherUsage) {
-                await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const stu = await Student.findById(req.params.id).session(session).select('name rollNumber');
+        if (!stu) throw new Error('Student not found');
+        
+        await Student.findByIdAndDelete(req.params.id).session(session);
+        await Result.deleteMany({ studentId: req.params.id }).session(session);
+        await Attendance.deleteMany({ studentId: req.params.id }).session(session);
+        await Fee.deleteMany({ studentId: req.params.id }).session(session);
+        
+        const docs = await StudentDoc.find({ studentId: req.params.id }).session(session);
+        await StudentDoc.deleteMany({ studentId: req.params.id }).session(session);
+
+        await session.commitTransaction();
+        session.endSession();
+
+        // Safely remove files from Cloudinary outside the transaction to prevent storage leaks
+        for (const doc of docs) {
+            if (doc.cloudinaryId) {
+                const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId });
+                if (!otherUsage) {
+                    await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+                }
             }
         }
+
+        await logAction(req, { action: `Deleted student & all data`, category: 'STUDENT', targetName: `${stu.name} (${stu.rollNumber})`, targetId: req.params.id });
+        res.json({ success: true, message: 'Student deleted' });
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        res.status(500).json({ success: false, message: error.message });
     }
-
-    await StudentDoc.deleteMany({ studentId: req.params.id });
-
-    // 🔍 AUDIT
-    await logAction(req, {
-        action: `Deleted student & all data`,
-        category: 'STUDENT',
-        targetName: stu ? `${stu.name} (${stu.rollNumber})` : '',
-        targetId: req.params.id
-    });
-
-    res.json({ success: true, message: 'Student deleted' });
 });
 
 // Bulk delete selected students (Superadmin Only)
@@ -407,31 +451,291 @@ router.post('/students/bulk-delete', auth, async (req, res) => {
             return res.status(401).json({ success: false, message: 'Incorrect superadmin password' });
         }
 
-        // Clean up related data first
-        await Result.deleteMany({ studentId: { $in: studentIds } });
-        await Attendance.deleteMany({ studentId: { $in: studentIds } });
-        await Fee.deleteMany({ studentId: { $in: studentIds } });
-        
-        const docs = await StudentDoc.find({ studentId: { $in: studentIds } });
-        for (const doc of docs) {
-            if (doc.cloudinaryId) {
-                const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId, studentId: { $nin: studentIds } });
-                if (!otherUsage) {
-                    await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            const docs = await StudentDoc.find({ studentId: { $in: studentIds } }).session(session);
+
+            await Result.deleteMany({ studentId: { $in: studentIds } }).session(session);
+            await Attendance.deleteMany({ studentId: { $in: studentIds } }).session(session);
+            await Fee.deleteMany({ studentId: { $in: studentIds } }).session(session);
+            await StudentDoc.deleteMany({ studentId: { $in: studentIds } }).session(session);
+            await Student.deleteMany({ _id: { $in: studentIds } }).session(session);
+
+            await session.commitTransaction();
+            session.endSession();
+
+            // Clean up cloudinary
+            for (const doc of docs) {
+                if (doc.cloudinaryId) {
+                    const otherUsage = await StudentDoc.exists({ cloudinaryId: doc.cloudinaryId });
+                    if (!otherUsage) {
+                        await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+                    }
                 }
             }
+
+            await logAction(req, { action: `Bulk deleted ${studentIds.length} students & all related data`, category: 'STUDENT' });
+            res.json({ success: true, message: `Successfully deleted ${studentIds.length} students.` });
+        } catch (err) {
+            await session.abortTransaction();
+            session.endSession();
+            throw err;
         }
-        await StudentDoc.deleteMany({ studentId: { $in: studentIds } });
-
-        // Finally delete the students
-        await Student.deleteMany({ _id: { $in: studentIds } });
-
-        await logAction(req, { action: `Bulk deleted ${studentIds.length} students & all related data`, category: 'STUDENT' });
-
-        res.json({ success: true, message: `Successfully deleted ${studentIds.length} students.` });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
+});
+
+// ---- STAFF ATTENDANCE REQUESTS ----
+// Teacher submits their own attendance for approval (Available to all non-superadmin staff)
+router.post('/staff-attendance/mark', auth, async (req, res) => {
+    try {
+        const { date, status, remarks, entryTime, exitTime } = req.body;
+        if (!date || !status) return res.status(400).json({ success: false, message: 'Date and status are required.' });
+        
+        const startOfDay = new Date(date);
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const endOfDay = new Date(date);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+
+        if (startOfDay.getUTCDay() === 0) {
+            return res.status(400).json({ success: false, message: 'Cannot mark attendance for Sundays.' });
+        }
+
+        const existing = await StaffAttendance.findOne({
+            adminId: req.admin.id,
+            date: { $gte: startOfDay, $lte: endOfDay }
+        });
+
+        if (existing) {
+            existing.status = status;
+            existing.remarks = remarks || '';
+            existing.entryTime = entryTime || '';
+            existing.exitTime = exitTime || '';
+            existing.approvalStatus = 'Pending';
+            existing.markedBy = 'Self';
+            await existing.save();
+            return res.json({ success: true, message: 'Attendance updated and sent for approval.' });
+        }
+
+        const record = new StaffAttendance({
+            adminId: req.admin.id,
+            date: startOfDay,
+            status,
+            remarks: remarks || '',
+            entryTime: entryTime || '',
+            exitTime: exitTime || '',
+            approvalStatus: 'Pending',
+            markedBy: 'Self'
+        });
+
+        await record.save();
+        await logAction(req, { action: `Submitted self attendance for ${date}`, category: 'ADMIN' });
+
+        res.status(201).json({ success: true, message: 'Attendance submitted for approval.' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Teacher views their own attendance
+router.get('/staff-attendance/my', auth, async (req, res) => {
+    try {
+        const records = await StaffAttendance.find({ adminId: req.admin.id }).sort({ date: -1 });
+        res.json({ success: true, records });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Admin: Get history for a specific staff
+router.get('/staff-attendance/history/:adminId', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+    try {
+        const { year, month } = req.query;
+        if (!year || !month) return res.status(400).json({ success: false, message: 'Year and month required' });
+        
+        const startDate = new Date(Date.UTC(year, month - 1, 1));
+        const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+        
+        const records = await StaffAttendance.find({
+            adminId: req.params.adminId,
+            date: { $gte: startDate, $lte: endDate }
+        }).sort({ date: -1 });
+        
+        res.json({ success: true, records });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Superadmin views all pending attendance records
+router.get('/staff-attendance/pending', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+    try {
+        const records = await StaffAttendance.find({ approvalStatus: 'Pending' }).sort({ date: 1 }).populate('adminId', 'username realName');
+        const formatted = records.map(r => ({ _id: r._id, teacherName: r.adminId?.realName || r.adminId?.username || 'Unknown', date: r.date, status: r.status, remarks: r.remarks, entryTime: r.entryTime, exitTime: r.exitTime }));
+        res.json({ success: true, pending: formatted });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Superadmin approves or rejects attendance
+router.put('/staff-attendance/approve/:id', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+    try {
+        const { approvalStatus } = req.body;
+        if (!['Approved', 'Rejected'].includes(approvalStatus)) return res.status(400).json({ success: false, message: 'Invalid status' });
+
+        const record = await StaffAttendance.findByIdAndUpdate(
+            req.params.id,
+            { approvalStatus },
+            { new: true }
+        );
+
+        if (!record) return res.status(404).json({ success: false, message: 'Record not found.' });
+        
+        await logAction(req, { action: `${approvalStatus} attendance for teacher ID ${record.adminId}`, category: 'ADMIN' });
+        res.json({ success: true, message: `Attendance ${approvalStatus.toLowerCase()} successfully.` });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ---- STAFF DAILY ATTENDANCE (PHASE 2) ----
+
+// Admin: Get today's staff attendance list
+router.get('/staff-attendance/today', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+    try {
+        const dateStr = req.query.date || new Date().toISOString().split('T')[0];
+        const startOfDay = new Date(dateStr);
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const endOfDay = new Date(dateStr);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+
+        const allAdmins = await Admin.find({ role: { $ne: 'superadmin' } }).select('-password');
+        const todayRecords = await StaffAttendance.find({ date: { $gte: startOfDay, $lte: endOfDay } });
+
+        const map = {};
+        todayRecords.forEach(r => map[r.adminId.toString()] = r);
+
+        const staffList = allAdmins.map(a => ({
+            adminId: a._id,
+            username: a.username,
+            realName: a.realName || '',
+            employeeId: a.employeeId || '',
+            status: map[a._id.toString()] ? map[a._id.toString()].status : 'Present',
+            remarks: map[a._id.toString()] ? map[a._id.toString()].remarks : ''
+        }));
+
+        res.json({ success: true, staffList });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Admin: Bulk mark staff attendance
+router.post('/staff-attendance/bulk', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+    try {
+        const { date, records } = req.body;
+        const startOfDay = new Date(date);
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const endOfDay = new Date(date);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+
+        for (const r of records) {
+            const existing = await StaffAttendance.findOne({ adminId: r.adminId, date: { $gte: startOfDay, $lte: endOfDay } });
+            if (existing) {
+                existing.status = r.status;
+                existing.remarks = r.remarks;
+                existing.approvalStatus = 'Approved'; // Bulk overrides to Approved
+                await existing.save();
+            } else {
+                await new StaffAttendance({
+                    adminId: r.adminId, date: startOfDay,
+                    status: r.status, remarks: r.remarks, markedBy: req.admin.username,
+                    approvalStatus: 'Approved'
+                }).save();
+            }
+        }
+        res.json({ success: true, message: 'Staff attendance saved successfully' });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ---- PHASE 3: STAFF PAYROLL ----
+
+// Admin: Get payroll list for a specific month
+router.get('/payroll/list', auth, requirePermission('staff.payroll.manage'), async (req, res) => {
+    try {
+        const { month } = req.query; // YYYY-MM
+        if (!month) return res.status(400).json({ success: false, message: 'Month required' });
+
+        const staffList = await Admin.find({ role: { $ne: 'superadmin' } }).select('-password');
+        const payrolls = await Payroll.find({ month });
+
+        const data = staffList.map(staff => {
+            const slip = payrolls.find(p => p.adminId.toString() === staff._id.toString());
+            return {
+                staffId: staff._id,
+                name: staff.realName || staff.username,
+                employeeId: staff.employeeId || '-',
+                basicSalary: staff.basicSalary || 0,
+                payroll: slip || null
+            };
+        });
+
+        res.json({ success: true, data });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Admin: Generate/Save Payroll Slip
+router.post('/payroll/generate', auth, requirePermission('staff.payroll.manage'), async (req, res) => {
+    try {
+        const { adminId, month, basicSalary, allowances, arrears, deductions, netSalary, status, remarks } = req.body;
+        
+        const slip = await Payroll.findOneAndUpdate(
+            { adminId, month },
+            { basicSalary, allowances, arrears, deductions, netSalary, status, remarks, generatedBy: req.admin.username },
+            { new: true, upsert: true }
+        );
+
+        await logAction(req, { action: `Generated salary slip for ${month}`, category: 'ADMIN', targetId: adminId });
+        res.json({ success: true, message: 'Salary slip saved successfully!', slip });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Teacher: Get my own salary slips
+router.get('/payroll/my', auth, async (req, res) => {
+    try {
+        const slips = await Payroll.find({ adminId: req.admin.id }).sort({ month: -1 });
+        res.json({ success: true, slips });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Shared: Download PDF (Admin OR the Teacher who owns it)
+router.get('/payroll/:id/pdf', auth, async (req, res) => {
+    try {
+        const slip = await Payroll.findById(req.params.id).populate('adminId');
+        if (!slip) return res.status(404).json({ error: 'Slip not found' });
+        
+        if (!slip.adminId) return res.status(404).json({ error: 'Staff member associated with this slip no longer exists.' });
+
+        const perms = req.admin.permissions || [];
+        
+        // Safely extract and stringify both IDs to prevent MongoDB type mismatch errors
+        const slipOwnerId = slip.adminId._id ? String(slip.adminId._id) : String(slip.adminId);
+        const currentUserId = req.admin.id ? String(req.admin.id) : String(req.admin._id);
+
+        if (req.admin.role !== 'superadmin' && slipOwnerId !== currentUserId && !perms.includes('staff.payroll.manage')) {
+            return res.status(403).json({ error: 'Access denied. You can only download your own slips.' });
+        }
+
+        let joined = 'N/A';
+        if (slip.adminId.joiningDate) {
+            const d = new Date(slip.adminId.joiningDate);
+            if (!isNaN(d.getTime())) joined = d.toLocaleDateString();
+        }
+
+        const data = { slipId: slip._id, month: slip.month, staffName: slip.adminId.realName || slip.adminId.username || 'Unknown', employeeId: slip.adminId.employeeId || 'N/A', role: slip.adminId.role || 'staff', joiningDate: joined, status: slip.status, basicSalary: slip.basicSalary, allowances: slip.allowances, arrears: slip.arrears, deductions: slip.deductions, netSalary: slip.netSalary };
+        const pdf = await generateSalarySlip(data);
+        res.setHeader('Content-Type', 'application/pdf'); res.setHeader('Content-Disposition', `inline; filename="SalarySlip_${data.month}.pdf"`); res.send(pdf);
+    } catch (e) { console.error('Salary slip error:', e); res.status(500).json({ error: e.message }); }
 });
 
 // ---- RESULTS ----

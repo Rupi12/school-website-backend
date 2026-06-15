@@ -8,7 +8,7 @@ const GOLD = '#c9a227';
 const GREY = '#6b7280';
 const GREEN = '#15803d';
 
-const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyotischool.in/verify';
+const VERIFY_BASE = process.env.VERIFY_URL || 'https://amarjyotischool.in/verify.html?id=';
 
 function inr(num) {
   let n = Math.round(Number(num || 0)).toString();
@@ -37,7 +37,7 @@ async function generateNOC(data) {
   const W = doc.page.width, M = 40;
 
   // QR
-  const verifyUrl = `${VERIFY_BASE}/${encodeURIComponent(data.nocNo)}`;
+  const verifyUrl = `${VERIFY_BASE}${encodeURIComponent(data.nocNo)}`;
   const qrDataUrl = await QRCode.toDataURL(verifyUrl, { margin: 1, width: 220, color: { dark: NAVY, light: '#fff' } });
   const qrBuffer = Buffer.from(qrDataUrl.split(',')[1], 'base64');
 

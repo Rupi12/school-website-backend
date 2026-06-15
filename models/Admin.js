@@ -6,8 +6,13 @@ const adminSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true, lowercase: true },
     password: { type: String, required: true },
     role: { type: String, enum: ['admin', 'superadmin'], default: 'admin' },
-    permissions: { type: [String], default: [] }
-    
+    permissions: { type: [String], default: [] },
+    realName: { type: String, default: '' },
+    employeeId: { type: String, default: '' },
+    phone: { type: String, default: '' },
+    qualifications: { type: String, default: '' },
+    joiningDate: { type: Date },
+    basicSalary: { type: Number, default: 0 }
 }, { timestamps: true });
 
 adminSchema.methods.comparePassword = async function (candidatePassword) {

@@ -6,6 +6,7 @@ const Admin = require('../models/Admin');
 const auth = require('../middleware/auth');
 const rateLimit = require('express-rate-limit');
 const { loginLimiter } = require('../middleware/rateLimiter');
+const requirePermission = require('../middleware/permission');
 const { logAction } = require('../utils/auditLogger');
 const AuditLog = require('../models/AuditLog');
 
@@ -46,15 +47,25 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 });
 
-function superOnly(req, res, next) {
-    if (req.admin.role !== 'superadmin') {
-        return res.status(403).json({ success: false, message: 'Super admin only' });
-    }
-    next();
-}
+// Middleware to check if user can edit staff profile OR permissions
+const canEditStaff = (req, res, next) => {
+    if (req.admin.role === 'superadmin') return next();
+    const p = req.admin.permissions || [];
+    if (p.includes('staff.edit.profile') || p.includes('staff.edit.permissions')) return next();
+    return res.status(403).json({ success: false, message: 'Permission denied' });
+};
+
+// Middleware to check if user has ANY staff permissions to view the directory
+const canViewStaff = (req, res, next) => {
+    if (req.admin.role === 'superadmin') return next();
+    const p = req.admin.permissions || [];
+    const staffPerms = ['staff.view', 'staff.create', 'staff.edit.profile', 'staff.edit.permissions', 'staff.reset.password', 'staff.delete', 'staff.attendance.approve'];
+    if (staffPerms.some(perm => p.includes(perm))) return next();
+    return res.status(403).json({ success: false, message: 'Permission denied' });
+};
 
 // List all admins
-router.get('/admins', auth, superOnly, async (req, res) => {
+router.get('/admins', auth, canViewStaff, async (req, res) => {
     try {
         const admins = await Admin.find().select('-password').sort({ createdAt: -1 });
         res.json({ success: true, admins });
@@ -64,7 +75,7 @@ router.get('/admins', auth, superOnly, async (req, res) => {
 });
 
 // Create sub-admin
-router.post('/admins', auth, superOnly, async (req, res) => {
+router.post('/admins', auth, requirePermission('staff.create'), async (req, res) => {
     try {
         const { username, email, password, permissions } = req.body;
         const exists = await Admin.findOne({ $or: [{ email }, { username }] });
@@ -86,11 +97,25 @@ router.post('/admins', auth, superOnly, async (req, res) => {
     }
 });
 
-// Update sub-admin permissions
-router.put('/admins/:id', auth, superOnly, async (req, res) => {
+// Update sub-admin permissions & profile
+router.put('/admins/:id', auth, canEditStaff, async (req, res) => {
     try {
+        const { permissions, realName, employeeId, phone, qualifications, joiningDate, basicSalary } = req.body;
+        
+        const updateData = {};
+        const canEditProfile = req.admin.permissions.includes('staff.edit.profile') || req.admin.role === 'superadmin';
+        const canEditPerms = req.admin.permissions.includes('staff.edit.permissions') || req.admin.role === 'superadmin';
+
+        if (canEditPerms && permissions) updateData.permissions = permissions;
+        if (canEditProfile && realName !== undefined) updateData.realName = realName;
+        if (canEditProfile && employeeId !== undefined) updateData.employeeId = employeeId;
+        if (canEditProfile && phone !== undefined) updateData.phone = phone;
+        if (canEditProfile && qualifications !== undefined) updateData.qualifications = qualifications;
+        if (canEditProfile && joiningDate !== undefined) updateData.joiningDate = joiningDate;
+        if (canEditProfile && basicSalary !== undefined) updateData.basicSalary = basicSalary;
+
         const admin = await Admin.findByIdAndUpdate(req.params.id,
-            { permissions: req.body.permissions }, { returnDocument: 'after' }).select('-password');
+            updateData, { returnDocument: 'after' }).select('-password');
 
         await logAction(req, {
             action: `Updated permissions for "${admin.username}"`,
@@ -106,7 +131,7 @@ router.put('/admins/:id', auth, superOnly, async (req, res) => {
 });
 
 // Delete sub-admin
-router.delete('/admins/:id', auth, superOnly, async (req, res) => {
+router.delete('/admins/:id', auth, requirePermission('staff.delete'), async (req, res) => {
     try {
         const target = await Admin.findById(req.params.id);
         if (target && target.role === 'superadmin') {
@@ -128,7 +153,7 @@ router.delete('/admins/:id', auth, superOnly, async (req, res) => {
 });
 
 // Reset a sub-admin's password
-router.put('/admins/:id/reset-password', auth, superOnly, async (req, res) => {
+router.put('/admins/:id/reset-password', auth, requirePermission('staff.reset.password'), async (req, res) => {
     try {
         const { newPassword } = req.body;
         if (!newPassword || newPassword.length < 6) {

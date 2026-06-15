@@ -53,6 +53,22 @@ router.post('/', auth, requirePermission('news.add'), upload.single('image'), as
     }
 });
 
+router.put('/:id', auth, requirePermission('news.edit'), async (req, res) => {
+    try {
+        const news = await News.findByIdAndUpdate(req.params.id, {
+            title: req.body.title,
+            category: req.body.category,
+            description: req.body.description,
+            eventDate: req.body.eventDate || null,
+            isPinned: req.body.isPinned
+        }, { returnDocument: 'after' });
+        
+        res.json({ success: true, message: 'Updated', news });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+});
+
 router.delete('/:id', auth, requirePermission('news.delete'), async (req, res) => {
     try {
         const news = await News.findById(req.params.id);
