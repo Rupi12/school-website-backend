@@ -23,7 +23,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         const token = jwt.sign(
             { id: admin._id, username: admin.username, role: admin.role, permissions: admin.permissions },
             process.env.JWT_SECRET,
-            { expiresIn: '24h' }
+            { expiresIn: '1h' }
         );
 
         // 🔍 AUDIT — login has no auth middleware, log directly

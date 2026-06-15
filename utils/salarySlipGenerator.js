@@ -65,7 +65,6 @@ exports.generateSalarySlip = async (data) => {
             doc.font('Helvetica').fontSize(10);
             doc.text(`Name: ${data.staffName || '-'}`, 60, startY + 30);
             doc.text(`Employee ID: ${data.employeeId || '-'}`, 60, startY + 45);
-            doc.text(`Role: ${String(data.role || 'Staff').toUpperCase()}`, 60, startY + 60);
 
             doc.text(`Joined: ${data.joiningDate || '-'}`, 300, startY + 30);
             doc.text(`Status: ${data.status || '-'}`, 300, startY + 45);
@@ -108,7 +107,9 @@ exports.generateSalarySlip = async (data) => {
 
             // --- DIGITAL SEAL & FOOTER ---
             let sY = totY + 70;
-            const sealR = 40; const sealX = W - M - 50; const sealY = sY + 30; 
+            const sigY = sY + 80; 
+            
+            const sealR = 40; const sealX = W - M - 50; const sealY = sigY - 20; 
             doc.save(); doc.lineWidth(1.5).strokeOpacity(0.8);
             doc.circle(sealX, sealY, sealR).stroke(GOLD);
             doc.circle(sealX, sealY, sealR - 6).dash(2, { space: 2 }).stroke(NAVY).undash();
@@ -117,7 +118,9 @@ exports.generateSalarySlip = async (data) => {
             doc.fill(GREY).fontSize(5.5).text('DIGITALLY GENERATED', sealX - sealR + 6, sealY + 14, { width: (sealR - 6) * 2, align: 'center' });
             doc.restore();
 
-            const sigY = sY + 80; 
+            // E-Signature (Stylized Text)
+            doc.fill('#1e40af').font('Times-Italic').fontSize(14).text('Amar Jyoti School HR', M + 5, sigY - 20);
+
             doc.moveTo(M, sigY).lineTo(M + 150, sigY).stroke('#9ca3af');
             doc.fill(GREY).font('Helvetica-Bold').fontSize(8.5).text('Authorized Signatory (HR)', M, sigY + 6);
 

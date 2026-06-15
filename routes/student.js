@@ -51,7 +51,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         const token = jwt.sign(
             { id: student._id, rollNumber: student.rollNumber, role: 'student' },
             process.env.JWT_SECRET,
-            { expiresIn: '24h' }
+            { expiresIn: '1h' }
         );
         res.json({
             success: true, token,

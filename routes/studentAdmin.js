@@ -623,7 +623,9 @@ router.get('/staff-attendance/today', auth, requirePermission('staff.attendance.
             realName: a.realName || '',
             employeeId: a.employeeId || '',
             status: map[a._id.toString()] ? map[a._id.toString()].status : 'Present',
-            remarks: map[a._id.toString()] ? map[a._id.toString()].remarks : ''
+            remarks: map[a._id.toString()] ? map[a._id.toString()].remarks : '',
+            entryTime: map[a._id.toString()] ? map[a._id.toString()].entryTime : '',
+            exitTime: map[a._id.toString()] ? map[a._id.toString()].exitTime : ''
         }));
 
         res.json({ success: true, staffList });
@@ -644,12 +646,16 @@ router.post('/staff-attendance/bulk', auth, requirePermission('staff.attendance.
             if (existing) {
                 existing.status = r.status;
                 existing.remarks = r.remarks;
+                if (r.entryTime) existing.entryTime = r.entryTime;
+                if (r.exitTime) existing.exitTime = r.exitTime;
                 existing.approvalStatus = 'Approved'; // Bulk overrides to Approved
                 await existing.save();
             } else {
                 await new StaffAttendance({
                     adminId: r.adminId, date: startOfDay,
-                    status: r.status, remarks: r.remarks, markedBy: req.admin.username,
+                    status: r.status, remarks: r.remarks, 
+                    entryTime: r.entryTime || '', exitTime: r.exitTime || '',
+                    markedBy: req.admin.username,
                     approvalStatus: 'Approved'
                 }).save();
             }

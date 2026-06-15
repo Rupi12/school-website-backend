@@ -105,29 +105,8 @@ app.get('/', (req, res) => {
 // Connect to MongoDB
 console.log('12. Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI)
-    .then(async () => {
+    .then(() => {
         console.log('✅ MongoDB connected successfully');
-        
-        // Cleanup stale permission keys from the database automatically
-        try {
-            const Admin = require('./models/Admin');
-            const validPermissions = [
-                'applications.view', 'applications.edit', 'applications.delete', 'applications.export',
-                'messages.view', 'messages.delete',
-                'gallery.add', 'gallery.edit', 'gallery.delete',
-                'news.add', 'news.edit', 'news.delete',
-                'documents.add', 'documents.delete',
-                'students.view', 'students.add', 'students.edit', 'students.delete', 'students.export',
-                'results.manage', 'fees.manage', 'attendance.manage', 'timetable.manage', 'studentdocs.manage',
-                'reports.view', 'audit.view'
-            ];
-            const result = await Admin.updateMany({}, { $pull: { permissions: { $nin: validPermissions } } });
-            if (result.modifiedCount > 0) {
-                console.log(`🧹 Automatically cleared stale permissions from ${result.modifiedCount} sub-admin(s).`);
-            }
-        } catch (err) {
-            console.error('Error cleaning permissions:', err.message);
-        }
     })
     .catch(err => console.error('❌ MongoDB connection error:', err.message));
 
