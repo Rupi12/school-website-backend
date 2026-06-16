@@ -112,8 +112,14 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+    app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
+
+//app.listen(PORT, '0.0.0.0', () => {
+  //console.log(`Local:   http://localhost:${PORT}`);
+  //console.log(`Network: http://10.104.35.40:${PORT}`);
+//});
+
 
 console.log('13. Setup complete, waiting for connections...');
