@@ -1,5 +1,16 @@
 console.log('1. Starting server...');
 
+// --- CRASH-PROOFING: GLOBAL ERROR HANDLERS ---
+// These will catch any errors that are not handled elsewhere in the app,
+// log them, and prevent the entire server from crashing.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', error);
+  process.exit(1); // It's often best to restart after an uncaught exception
+});
+
 const express = require('express');
 console.log('2. Express loaded');
 
@@ -41,7 +52,7 @@ app.use(helmet());
 // Right now, any website in the world can make requests to your API. 
 // We must restrict this to ONLY your specific Netlify frontend URL.
 app.use(cors({
-    origin: ['http://localhost:5500', 'http://127.0.0.1:5500','https://www.amarjyotischool.in','https://amarjyotischool.in', 'https://amarjyotischooll.netlify.app',], 
+    origin: ['http://localhost:5500', 'http://127.0.0.1:5500','https://www.amarjyotischool.in','https://amarjyotischool.in', 'https://amarjyotischool.netlify.app'], 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true // Required if you ever use cookies
 }));
