@@ -27,7 +27,7 @@ const studentAuth = require('../middleware/studentAuth');
 function anyStudentPerm(req, res, next) {
     if (req.admin.role === 'superadmin') return next();
     const p = req.admin.permissions || [];
-    const valid = ['students.view', 'students.add', 'students.edit', 'students.delete', 'students.export', 'results.manage', 'fees.manage', 'attendance.manage', 'timetable.manage', 'studentdocs.manage'];
+    const valid = ['students.view', 'students.add', 'students.edit', 'students.delete', 'students.export', 'results.manage', 'fees.manage', 'attendance.manage', 'timetable.manage', 'studentdocs.manage', 'students.view.details'];
     if (valid.some(v => p.includes(v))) return next();
     return res.status(403).json({ success: false, message: 'Permission denied' });
 }
@@ -227,7 +227,7 @@ router.get('/attendance/check', auth, requirePermission('attendance.manage'), as
 });
 
 // Get student's results/fees/docs
-router.get('/student-data/:id', auth, anyStudentPerm, async (req, res) => {
+router.get('/student-data/:id', auth, requirePermission('students.view.details'), async (req, res) => {
     try {
         const results = await Result.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const fees = await Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 });

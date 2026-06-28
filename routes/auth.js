@@ -59,8 +59,7 @@ const canEditStaff = (req, res, next) => {
 const canViewStaff = (req, res, next) => {
     if (req.admin.role === 'superadmin') return next();
     const p = req.admin.permissions || [];
-    const staffPerms = ['staff.view', 'staff.create', 'staff.edit.profile', 'staff.edit.permissions', 'staff.reset.password', 'staff.delete', 'staff.attendance.approve'];
-    if (staffPerms.some(perm => p.includes(perm))) return next();
+    if (p.includes('staff.view')) return next();
     return res.status(403).json({ success: false, message: 'Permission denied' });
 };
 
