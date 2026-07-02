@@ -236,7 +236,10 @@ router.get('/student-data/:id([0-9a-fA-F]{24})', auth, anyStudentPerm, async (re
         const results = await Result.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const fees = await Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const documents = await StudentDoc.find({ studentId: req.params.id }).sort({ createdAt: -1 });
-        res.json({ success: true, student, results, fees, documents });
+        const attendance = await Attendance.find({ studentId: req.params.id }).sort({ date: -1 }).limit(15);
+        const timetable = await Timetable.findOne({ class: student.class, section: student.section || '' });
+
+        res.json({ success: true, student, results, fees, documents, attendance, timetable });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
