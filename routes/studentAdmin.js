@@ -109,12 +109,13 @@ router.get('/my-noc', studentAuth , async (req, res) => {
 });
 
 // Download a receipt PDF for a specific payment (admin)
-router.get('/receipt/:receiptNo', auth, requirePermission('fees.manage'), async (req, res) => {
+router.get('/receipt', auth, requirePermission('fees.manage'), async (req, res) => {
   try {
-    const fee = await Fee.findOne({ 'payments.receiptNo': req.params.receiptNo });
+    const { receiptNo } = req.query;
+    const fee = await Fee.findOne({ 'payments.receiptNo': receiptNo });
     if (!fee) return res.status(404).json({ error: 'Receipt not found' });
 
-    const payment = fee.payments.find(p => String(p.receiptNo) === String(req.params.receiptNo));
+    const payment = fee.payments.find(p => String(p.receiptNo) === String(receiptNo));
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     const student = await Student.findById(fee.studentId).lean();
     if (!student) return res.status(404).json({ error: 'Student not found' });
@@ -123,7 +124,7 @@ router.get('/receipt/:receiptNo', auth, requirePermission('fees.manage'), async 
     let paidTillDate = 0;
     for (const p of fee.payments) {
       paidTillDate += (p.amount || 0);
-      if (String(p.receiptNo) === String(req.params.receiptNo)) break;
+      if (String(p.receiptNo) === String(receiptNo)) break;
     }
 
     const pdf = await generateReceipt({
@@ -227,12 +228,15 @@ router.get('/attendance/check', auth, requirePermission('attendance.manage'), as
 });
 
 // Get student's results/fees/docs
-router.get('/student-data/:id', auth, requirePermission('students.view.details'), async (req, res) => {
+router.get('/student-data/:id([0-9a-fA-F]{24})', auth, anyStudentPerm, async (req, res) => {
     try {
+        const student = await Student.findById(req.params.id).select('-password').lean();
+        if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+
         const results = await Result.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const fees = await Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 });
         const documents = await StudentDoc.find({ studentId: req.params.id }).sort({ createdAt: -1 });
-        res.json({ success: true, results, fees, documents });
+        res.json({ success: true, student, results, fees, documents });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -376,7 +380,7 @@ router.post('/students', auth, requirePermission('students.add'), async (req, re
     }
 });
 
-router.put('/students/:id', auth, requirePermission('students.edit'), async (req, res) => {
+router.put('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.edit'), async (req, res) => {
     try {
         const { name, rollNumber, class: cls, section, parentName, phone } = req.body;
         
@@ -396,7 +400,30 @@ router.put('/students/:id', auth, requirePermission('students.edit'), async (req
     }
 });
 
-router.delete('/students/:id', auth, requirePermission('students.delete'), async (req, res) => {
+router.put('/students/:id([0-9a-fA-F]{24})/reset-password', auth, requirePermission('students.edit'), async (req, res) => {
+    try {
+        const { password } = req.body;
+        if (!password || password.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const updatedStudent = await Student.findByIdAndUpdate(
+            req.params.id,
+            { password: hashedPassword }
+        );
+
+        if (!updatedStudent) return res.status(404).json({ success: false, message: 'Student not found' });
+
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error resetting password' });
+    }
+});
+
+router.delete('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.delete'), async (req, res) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
@@ -746,7 +773,7 @@ router.get('/payroll/:id/pdf', auth, async (req, res) => {
 
 // ---- RESULTS ----
 
-router.get('/results/:id/pdf', auth, requirePermission('results.manage'), async (req, res) => {
+router.get('/results/:id([0-9a-fA-F]{24})/pdf', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const result = await Result.findById(req.params.id);
         if (!result) return res.status(404).json({ error: 'Result not found' });
@@ -818,7 +845,7 @@ router.post('/results', auth, requirePermission('results.manage'), async (req, r
     }
 });
 
-router.get('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
+router.get('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const result = await Result.findById(req.params.id);
         res.json({ success: true, result });
@@ -827,7 +854,7 @@ router.get('/results/:id', auth, requirePermission('results.manage'), async (req
     }
 });
 
-router.put('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
+router.put('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         const { examName, term, academicYear, examDate, subjects, remark } = req.body;
         const result = await Result.findByIdAndUpdate(
@@ -841,7 +868,7 @@ router.put('/results/:id', auth, requirePermission('results.manage'), async (req
     }
 });
 
-router.delete('/results/:id', auth, requirePermission('results.manage'), async (req, res) => {
+router.delete('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
     try {
         await Result.findByIdAndDelete(req.params.id);
         res.json({ success: true, message: 'Result deleted' });
@@ -923,7 +950,7 @@ router.post('/fees', auth, requirePermission('fees.manage'), async (req, res) =>
 });
 
 // Edit fee details
-router.patch('/fees/:id', auth, requirePermission('fees.manage'), async (req, res) => {
+router.patch('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const { academicYear, feeType, amount, discount, discountReason, category, dueDate } = req.body;
         
@@ -955,7 +982,7 @@ router.patch('/fees/:id', auth, requirePermission('fees.manage'), async (req, re
 });
 
 // Record payment (installment)
-router.post('/fees/:id/pay', auth, requirePermission('fees.manage'), async (req, res) => {
+router.post('/fees/:id([0-9a-fA-F]{24})/pay', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const { amount, mode, receiptNo, remarks, date, collectedBy } = req.body;
         
@@ -1006,7 +1033,7 @@ router.post('/fees/:id/pay', auth, requirePermission('fees.manage'), async (req,
 });
 
 // Delete a specific payment
-router.delete('/fees/:feeId/pay/:paymentId', auth, requirePermission('fees.manage'), async (req, res) => {
+router.delete('/fees/:feeId([0-9a-fA-F]{24})/pay/:paymentId', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.feeId);
         if (!fee) return res.status(404).json({ success: false, message: 'Fee not found' });
@@ -1032,7 +1059,7 @@ router.delete('/fees/:feeId/pay/:paymentId', auth, requirePermission('fees.manag
 });
 
 // Delete entire fee
-router.delete('/fees/:id', auth, requirePermission('fees.manage'), async (req, res) => {
+router.delete('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.id);
         await Fee.findByIdAndDelete(req.params.id);
@@ -1139,7 +1166,7 @@ router.post('/documents/bulk', auth, requirePermission('studentdocs.manage'), up
     }
 });
 
-router.get('/documents/:id', auth, requirePermission('studentdocs.manage'), async (req, res) => {
+router.get('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         res.json({ success: true, document: doc });
@@ -1148,7 +1175,7 @@ router.get('/documents/:id', auth, requirePermission('studentdocs.manage'), asyn
     }
 });
 
-router.put('/documents/:id', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
+router.put('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
@@ -1167,7 +1194,7 @@ router.put('/documents/:id', auth, requirePermission('studentdocs.manage'), uplo
     }
 });
 
-router.delete('/documents/:id', auth, requirePermission('studentdocs.manage'), async (req, res) => {
+router.delete('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (doc && doc.cloudinaryId) {

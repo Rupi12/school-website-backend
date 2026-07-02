@@ -376,16 +376,17 @@ router.get('/my-fees', studentAuth, async (req, res) => {
 
 
 // Student/parent downloads their OWN receipt (IDOR-safe via JWT)
-router.get('/my-receipt/:receiptNo', studentAuth, async (req, res) => {
+router.get('/my-receipt', studentAuth, async (req, res) => {
   try {
+    const { receiptNo } = req.query;
     // studentId comes from verified JWT, NOT the URL — prevents tampering
     const fee = await Fee.findOne({
       studentId: req.student.id,
-      'payments.receiptNo': req.params.receiptNo,
+      'payments.receiptNo': receiptNo,
     });
     if (!fee) return res.status(404).json({ error: 'Receipt not found' });
 
-    const payment = fee.payments.find(p => String(p.receiptNo) === String(req.params.receiptNo));
+    const payment = fee.payments.find(p => String(p.receiptNo) === String(receiptNo));
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     const student = await Student.findById(req.student.id).lean();
 
@@ -393,7 +394,7 @@ router.get('/my-receipt/:receiptNo', studentAuth, async (req, res) => {
     let paidTillDate = 0;
     for (const p of fee.payments) {
       paidTillDate += (p.amount || 0);
-      if (String(p.receiptNo) === String(req.params.receiptNo)) break;
+      if (String(p.receiptNo) === String(receiptNo)) break;
     }
 
     const pdf = await generateReceipt({

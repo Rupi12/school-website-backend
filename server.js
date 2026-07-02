@@ -49,13 +49,9 @@ app.use(hpp());
 app.use(helmet());
 
 // 2. Strict CORS Policy
-// Right now, any website in the world can make requests to your API. 
-// We must restrict this to ONLY your specific Netlify frontend URL.
-app.use(cors({
-    origin: ['http://localhost:5500', 'http://127.0.0.1:5500','https://www.amarjyotischool.in','https://amarjyotischool.in', 'https://amarjyotischool.netlify.app'], 
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    credentials: true // Required if you ever use cookies
-}));
+// Allow requests from any origin. This is necessary for the Expo mobile app to work.
+// For a public API accessed by a native app, this is a common configuration.
+app.use(cors());
 
 // Body parser (Existing)
 app.use(express.json({ limit: '1mb' }));  // limit to save it payload crashing 
