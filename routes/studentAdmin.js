@@ -227,6 +227,53 @@ router.get('/attendance/check', auth, requirePermission('attendance.manage'), as
     }
 });
 
+// Get all student IDs for a given filter (for bulk selection)
+router.get('/students/ids', auth, anyStudentPerm, async (req, res) => {
+    try {
+        const search = req.query.search || '';
+        const classFilter = req.query.class || '';
+
+        const query = {};
+        if (classFilter) query.class = classFilter;
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { rollNumber: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const students = await Student.find(query).select('_id');
+        const ids = students.map(s => s._id);
+        res.json({ success: true, ids });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Get full attendance history for a student
+router.get('/attendance/history/:studentId([0-9a-fA-F]{24})', auth, anyStudentPerm, async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!from || !to) {
+            return res.status(400).json({ success: false, message: 'From and To dates are required.' });
+        }
+
+        const startDate = new Date(from);
+        startDate.setUTCHours(0, 0, 0, 0);
+        const endDate = new Date(to);
+        endDate.setUTCHours(23, 59, 59, 999);
+
+        const records = await Attendance.find({
+            studentId: req.params.studentId,
+            date: { $gte: startDate, $lte: endDate }
+        }).sort({ date: -1 });
+
+        res.json({ success: true, records });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 // Get student's results/fees/docs
 router.get('/student-data/:id([0-9a-fA-F]{24})', auth, anyStudentPerm, async (req, res) => {
     try {
