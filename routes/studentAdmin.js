@@ -227,6 +227,36 @@ router.get('/attendance/check', auth, requirePermission('attendance.manage'), as
     }
 });
 
+// Get multiple students by their IDs
+router.post('/students/by-ids', auth, anyStudentPerm, async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!ids || !Array.isArray(ids)) {
+            return res.status(400).json({ success: false, message: 'Student IDs must be an array.' });
+        }
+        // Fetch students and ensure they are returned in a predictable order
+        const students = await Student.find({ '_id': { $in: ids } }).select('name rollNumber class section').sort({ class: 1, rollNumber: 1 }).lean();
+        res.json({ success: true, students });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Get multiple students by their IDs
+router.post('/students/by-ids', auth, anyStudentPerm, async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!ids || !Array.isArray(ids)) {
+            return res.status(400).json({ success: false, message: 'Student IDs must be an array.' });
+        }
+        // Fetch students and ensure they are returned in a predictable order
+        const students = await Student.find({ '_id': { $in: ids } }).select('name rollNumber class section').sort({ class: 1, rollNumber: 1 }).lean();
+        res.json({ success: true, students });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 // Get all student IDs for a given filter (for bulk selection)
 router.get('/students/ids', auth, anyStudentPerm, async (req, res) => {
     try {
