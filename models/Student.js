@@ -9,7 +9,8 @@ const studentSchema = new mongoose.Schema({
     section: { type: String, default: '' },
     parentName: { type: String, default: '' },
     phone: { type: String, default: '' },
-    email: { type: String, default: '' }
+    email: { type: String, default: '' },
+    pushToken: { type: String, default: '' } // Expo push token for notifications
 }, { timestamps: true });
 
 studentSchema.methods.comparePassword = async function(pw) {

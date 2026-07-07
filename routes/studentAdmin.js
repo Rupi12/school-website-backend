@@ -20,6 +20,20 @@ const { generateReceipt } = require('../utils/receiptGenerator');
 const { generateNOC } = require('../utils/nocGenerator');
 const { generateSalarySlip } = require('../utils/salarySlipGenerator');
 const { generateReportCard } = require('../utils/reportCardGenerator');
+const { sendPushToTokens } = require('../utils/pushNotifications');
+const { isRestricted, applyClassScope, canAccessClass, requireClassAccessForStudent, requireClassAccessForRecord } = require('../middleware/classAccess');
+const classAccessById = requireClassAccessForStudent(Student); // default: reads req.params.studentId/id or req.body.studentId
+const resultClassAccess = requireClassAccessForRecord(Result, Student);
+const feeClassAccess = (idParam) => requireClassAccessForRecord(Fee, Student, idParam);
+const docClassAccess = requireClassAccessForRecord(StudentDoc, Student);
+
+// Helper: notify a single student by id (best-effort, never throws).
+async function notifyStudent(studentId, title, body, data = {}) {
+    try {
+        const stu = await Student.findById(studentId).select('pushToken').lean();
+        if (stu && stu.pushToken) await sendPushToTokens([stu.pushToken], title, body, data);
+    } catch (_) { /* push is best-effort */ }
+}
 const studentAuth = require('../middleware/studentAuth');
 
 
@@ -30,6 +44,17 @@ function anyStudentPerm(req, res, next) {
     const valid = ['students.view', 'students.add', 'students.edit', 'students.delete', 'students.export', 'results.manage', 'fees.manage', 'attendance.manage', 'timetable.manage', 'studentdocs.manage', 'students.view.details'];
     if (valid.some(v => p.includes(v))) return next();
     return res.status(403).json({ success: false, message: 'Permission denied' });
+}
+
+// Stricter than anyStudentPerm: requires one of a specific, small set of
+// permissions rather than any broad student permission.
+function requireAnyOf(...perms) {
+    return (req, res, next) => {
+        if (req.admin.role === 'superadmin') return next();
+        const p = req.admin.permissions || [];
+        if (perms.some(v => p.includes(v))) return next();
+        return res.status(403).json({ success: false, message: 'Permission denied' });
+    };
 }
 
 // ---- SPECIFIC ROUTES FIRST (before :id routes) ----
@@ -69,7 +94,7 @@ async function buildNocData(studentId) {
 }
 
 // Admin: download NOC for a student (only if all dues cleared)
-router.get('/noc/:studentId', auth, requirePermission('fees.manage'), async (req, res) => {
+router.get('/noc/:studentId', auth, requirePermission('fees.manage'), classAccessById, async (req, res) => {
   try {
     const data = await buildNocData(req.params.studentId);
     if (!data) return res.status(400).json({ error: 'Student has pending dues — NOC not available' });
@@ -119,6 +144,9 @@ router.get('/receipt', auth, requirePermission('fees.manage'), async (req, res) 
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     const student = await Student.findById(fee.studentId).lean();
     if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (!canAccessClass(req.admin, student.class)) {
+      return res.status(403).json({ error: 'You do not have access to this student\'s class' });
+    }
 
     // Calculate accurately up to THIS specific payment, not future ones
     let paidTillDate = 0;
@@ -189,6 +217,9 @@ router.get('/verify-receipt/:receiptNo', async (req, res) => {
 /// Get students by class
 router.get('/students/class/:class', auth, anyStudentPerm, async (req, res) => {
     try {
+        if (!canAccessClass(req.admin, req.params.class)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+        }
         const query = { class: req.params.class };
         if (req.query.section) query.section = req.query.section;
         const students = await Student.find(query).select('-password').collation({ locale: "en_US", numericOrdering: true }).sort({ rollNumber: 1 });
@@ -201,7 +232,8 @@ router.get('/students/class/:class', auth, anyStudentPerm, async (req, res) => {
 // Get unique class list
 router.get('/classes', auth, anyStudentPerm, async (req, res) => {
     try {
-        const classes = await Student.distinct('class');
+        let classes = await Student.distinct('class');
+        if (isRestricted(req.admin)) classes = classes.filter(c => req.admin.allowedClasses.includes(c));
         res.json({ success: true, classes: classes.sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true })) });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -212,6 +244,9 @@ router.get('/classes', auth, anyStudentPerm, async (req, res) => {
 router.get('/attendance/check', auth, requirePermission('attendance.manage'), async (req, res) => {
     try {
         const { class: cls, date } = req.query;
+        if (!canAccessClass(req.admin, cls)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+        }
         const day = new Date(date);
         day.setHours(0,0,0,0);
         const nextDay = new Date(day);
@@ -235,22 +270,9 @@ router.post('/students/by-ids', auth, anyStudentPerm, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Student IDs must be an array.' });
         }
         // Fetch students and ensure they are returned in a predictable order
-        const students = await Student.find({ '_id': { $in: ids } }).select('name rollNumber class section').sort({ class: 1, rollNumber: 1 }).lean();
-        res.json({ success: true, students });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Get multiple students by their IDs
-router.post('/students/by-ids', auth, anyStudentPerm, async (req, res) => {
-    try {
-        const { ids } = req.body;
-        if (!ids || !Array.isArray(ids)) {
-            return res.status(400).json({ success: false, message: 'Student IDs must be an array.' });
-        }
-        // Fetch students and ensure they are returned in a predictable order
-        const students = await Student.find({ '_id': { $in: ids } }).select('name rollNumber class section').sort({ class: 1, rollNumber: 1 }).lean();
+        const idQuery = { '_id': { $in: ids } };
+        if (isRestricted(req.admin)) idQuery.class = { $in: req.admin.allowedClasses };
+        const students = await Student.find(idQuery).select('name rollNumber class section').sort({ class: 1, rollNumber: 1 }).lean();
         res.json({ success: true, students });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -271,6 +293,7 @@ router.get('/students/ids', auth, anyStudentPerm, async (req, res) => {
                 { rollNumber: { $regex: search, $options: 'i' } }
             ];
         }
+        applyClassScope(req, query);
 
         const students = await Student.find(query).select('_id');
         const ids = students.map(s => s._id);
@@ -281,7 +304,7 @@ router.get('/students/ids', auth, anyStudentPerm, async (req, res) => {
 });
 
 // Get full attendance history for a student
-router.get('/attendance/history/:studentId([0-9a-fA-F]{24})', auth, anyStudentPerm, async (req, res) => {
+router.get('/attendance/history/:studentId([0-9a-fA-F]{24})', auth, requireAnyOf('attendance.manage', 'students.view.details'), classAccessById, async (req, res) => {
     try {
         const { from, to } = req.query;
         if (!from || !to) {
@@ -305,16 +328,24 @@ router.get('/attendance/history/:studentId([0-9a-fA-F]{24})', auth, anyStudentPe
 });
 
 // Get student's results/fees/docs
-router.get('/student-data/:id([0-9a-fA-F]{24})', auth, anyStudentPerm, async (req, res) => {
+router.get('/student-data/:id([0-9a-fA-F]{24})', auth, anyStudentPerm, requireClassAccessForStudent(Student, r => r.params.id), async (req, res) => {
     try {
         const student = await Student.findById(req.params.id).select('-password').lean();
         if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
 
-        const results = await Result.find({ studentId: req.params.id }).sort({ createdAt: -1 });
-        const fees = await Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 });
-        const documents = await StudentDoc.find({ studentId: req.params.id }).sort({ createdAt: -1 });
-        const attendance = await Attendance.find({ studentId: req.params.id }).sort({ date: -1 }).limit(15);
-        const timetable = await Timetable.findOne({ class: student.class, section: student.section || '' });
+        // anyStudentPerm only confirms the caller has SOME student permission — each
+        // section below is only populated if the caller actually holds the specific
+        // permission for it (or the broad "view details" permission), so a
+        // results-only admin can't pull fees/attendance/docs/timetable through here.
+        const canSee = (perm) => req.admin.role === 'superadmin' || req.admin.permissions.includes(perm) || req.admin.permissions.includes('students.view.details');
+
+        const [results, fees, documents, attendance] = await Promise.all([
+            canSee('results.manage') ? Result.find({ studentId: req.params.id }).sort({ createdAt: -1 }) : [],
+            canSee('fees.manage') ? Fee.find({ studentId: req.params.id }).sort({ createdAt: -1 }) : [],
+            canSee('studentdocs.manage') ? StudentDoc.find({ studentId: req.params.id }).sort({ createdAt: -1 }) : [],
+            canSee('attendance.manage') ? Attendance.find({ studentId: req.params.id }).sort({ date: -1 }).limit(15) : [],
+        ]);
+        const timetable = canSee('timetable.manage') ? await Timetable.findOne({ class: student.class, section: student.section || '' }) : null;
 
         res.json({ success: true, student, results, fees, documents, attendance, timetable });
     } catch (error) {
@@ -331,10 +362,20 @@ router.post('/attendance/bulk', auth, requirePermission('attendance.manage'), as
         const nextDay = new Date(day);
         nextDay.setDate(day.getDate() + 1);
         let updated = 0, created = 0, skipped = 0;
-        
+
         const isSuperadmin = req.admin.role === 'superadmin';
 
-        for (const r of records) {
+        let scopedRecords = records;
+        if (isRestricted(req.admin)) {
+            const ids = records.map(r => r.studentId);
+            const allowedIds = new Set(
+                (await Student.find({ _id: { $in: ids }, class: { $in: req.admin.allowedClasses } }).select('_id')).map(s => String(s._id))
+            );
+            scopedRecords = records.filter(r => allowedIds.has(String(r.studentId)));
+            skipped += records.length - scopedRecords.length;
+        }
+
+        for (const r of scopedRecords) {
             const existing = await Attendance.findOne({ studentId: r.studentId, date: { $gte: day, $lt: nextDay } });
             if (existing) {
                 if (!isSuperadmin) {
@@ -367,6 +408,9 @@ router.post('/fees/bulk', auth, requirePermission('fees.manage'), async (req, re
         const { class: cls, section, academicYear, category, feeType, amount, discount, discountReason, dueDate } = req.body;
         if (!cls || !feeType || !amount) {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
+        }
+        if (!canAccessClass(req.admin, cls)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
         }
 
         const validAmt = Number(amount);
@@ -422,6 +466,7 @@ router.get('/students', auth, anyStudentPerm, async (req, res) => {
                 { rollNumber: { $regex: search, $options: 'i' } }
             ];
         }
+        applyClassScope(req, query);
 
         const total = await Student.countDocuments(query);
         const students = await Student.find(query)
@@ -439,7 +484,17 @@ router.get('/students', auth, anyStudentPerm, async (req, res) => {
 
 router.get('/students-export', auth, requirePermission('students.export'), async (req, res) => {
     try {
-        const students = await Student.find().select('-password').sort({ class: 1, rollNumber: 1 });
+        const { search, class: classFilter } = req.query;
+        const query = {};
+        if (classFilter) query.class = classFilter;
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { rollNumber: { $regex: search, $options: 'i' } }
+            ];
+        }
+        applyClassScope(req, query);
+        const students = await Student.find(query).select('-password').sort({ class: 1, rollNumber: 1 });
         res.json({ success: true, students });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -449,6 +504,9 @@ router.get('/students-export', auth, requirePermission('students.export'), async
 router.post('/students', auth, requirePermission('students.add'), async (req, res) => {
     try {
         const { name, rollNumber, password, class: cls, section, parentName, phone, email } = req.body;
+        if (!canAccessClass(req.admin, cls)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+        }
         const exists = await Student.findOne({ rollNumber });
         if (exists) return res.status(400).json({ success: false, message: 'Roll number exists' });
         const hashed = await bcrypt.hash(password, 10);
@@ -460,10 +518,13 @@ router.post('/students', auth, requirePermission('students.add'), async (req, re
     }
 });
 
-router.put('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.edit'), async (req, res) => {
+router.put('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.edit'), classAccessById, async (req, res) => {
     try {
         const { name, rollNumber, class: cls, section, parentName, phone } = req.body;
-        
+        if (!canAccessClass(req.admin, cls)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to the target class' });
+        }
+
         const existing = await Student.findOne({ rollNumber, _id: { $ne: req.params.id } });
         if (existing) {
             return res.status(400).json({ success: false, message: `Roll number ${rollNumber} is already assigned to another student!` });
@@ -480,7 +541,7 @@ router.put('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.e
     }
 });
 
-router.put('/students/:id([0-9a-fA-F]{24})/reset-password', auth, requirePermission('students.edit'), async (req, res) => {
+router.put('/students/:id([0-9a-fA-F]{24})/reset-password', auth, requirePermission('students.edit'), classAccessById, async (req, res) => {
     try {
         const { password } = req.body;
         if (!password || password.length < 6) {
@@ -503,7 +564,7 @@ router.put('/students/:id([0-9a-fA-F]{24})/reset-password', auth, requirePermiss
     }
 });
 
-router.delete('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.delete'), async (req, res) => {
+router.delete('/students/:id([0-9a-fA-F]{24})', auth, requirePermission('students.delete'), classAccessById, async (req, res) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
@@ -647,36 +708,57 @@ router.post('/staff-attendance/mark', auth, async (req, res) => {
     }
 });
 
-// Teacher views their own attendance
+// Middleware to check for staff attendance approval permissions
+function canApproveStaffAttendance(req, res, next) {
+    if ((req.admin.role && req.admin.role.toLowerCase() === 'superadmin') || (req.admin.permissions && req.admin.permissions.includes('staff.attendance.approve'))) {
+        return next();
+    }
+    return res.status(403).json({ success: false, message: 'Permission denied for this action.' });
+}
+
+// Teacher views their own attendance. Optional ?year=&month= (1-indexed) scopes
+// the summary to that month — defaults to the current month. Sundays are
+// naturally excluded since the mark route already rejects Sunday submissions,
+// so counting only Approved records (not calendar days) keeps them out of both
+// the numerator and denominator without extra date math.
 router.get('/staff-attendance/my', auth, async (req, res) => {
     try {
         const records = await StaffAttendance.find({ adminId: req.admin.id }).sort({ date: -1 });
-        res.json({ success: true, records });
+
+        const now = new Date();
+        const year = parseInt(req.query.year) || now.getFullYear();
+        const month = parseInt(req.query.month) || (now.getMonth() + 1); // 1-indexed
+        const monthRecords = records.filter(r => {
+            const d = new Date(r.date);
+            return d.getFullYear() === year && d.getMonth() + 1 === month && r.approvalStatus === 'Approved';
+        });
+        const total = monthRecords.length;
+        const present = monthRecords.filter(r => r.status === 'Present').length;
+        const summary = { total, present, percentage: total ? Math.round((present / total) * 100) : 0 };
+
+        res.json({ success: true, records, summary });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 // Admin: Get history for a specific staff
-router.get('/staff-attendance/history/:adminId', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+router.get('/staff-attendance/history/:adminId', auth, canApproveStaffAttendance, async (req, res) => {
     try {
         const { year, month } = req.query;
         if (!year || !month) return res.status(400).json({ success: false, message: 'Year and month required' });
-        
         const startDate = new Date(Date.UTC(year, month - 1, 1));
         const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-        
         const records = await StaffAttendance.find({
             adminId: req.params.adminId,
             date: { $gte: startDate, $lte: endDate }
         }).sort({ date: -1 });
-        
         res.json({ success: true, records });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Superadmin views all pending attendance records
-router.get('/staff-attendance/pending', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+// Reviewer views all pending staff attendance submissions awaiting approval.
+router.get('/staff-attendance/pending', auth, canApproveStaffAttendance, async (req, res) => {
     try {
         const records = await StaffAttendance.find({ approvalStatus: 'Pending' }).sort({ date: 1 }).populate('adminId', 'username realName');
         const formatted = records.map(r => ({ _id: r._id, teacherName: r.adminId?.realName || r.adminId?.username || 'Unknown', date: r.date, status: r.status, remarks: r.remarks, entryTime: r.entryTime, exitTime: r.exitTime }));
@@ -686,8 +768,18 @@ router.get('/staff-attendance/pending', auth, requirePermission('staff.attendanc
     }
 });
 
+// Admin: Get all staff for selection dropdowns (Daily Roster / Attendance History).
+router.get('/staff-list', auth, canApproveStaffAttendance, async (req, res) => {
+    try {
+        const staff = await Admin.find({ role: { $ne: 'superadmin' } }).select('realName username employeeId').sort('realName');
+        res.json({ success: true, staff });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
 // Superadmin approves or rejects attendance
-router.put('/staff-attendance/approve/:id', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+router.put('/staff-attendance/approve/:id', auth, canApproveStaffAttendance, async (req, res) => {
     try {
         const { approvalStatus } = req.body;
         if (!['Approved', 'Rejected'].includes(approvalStatus)) return res.status(400).json({ success: false, message: 'Invalid status' });
@@ -709,8 +801,8 @@ router.put('/staff-attendance/approve/:id', auth, requirePermission('staff.atten
 
 // ---- STAFF DAILY ATTENDANCE (PHASE 2) ----
 
-// Admin: Get today's staff attendance list
-router.get('/staff-attendance/today', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+// Admin: Get today's staff attendance roster (all non-superadmin staff).
+router.get('/staff-attendance/today', auth, canApproveStaffAttendance, async (req, res) => {
     try {
         const dateStr = req.query.date || new Date().toISOString().split('T')[0];
         const startOfDay = new Date(dateStr);
@@ -718,29 +810,36 @@ router.get('/staff-attendance/today', auth, requirePermission('staff.attendance.
         const endOfDay = new Date(dateStr);
         endOfDay.setUTCHours(23, 59, 59, 999);
 
-        const allAdmins = await Admin.find({ role: { $ne: 'superadmin' } }).select('-password');
+        const allAdmins = await Admin.find({ role: { $ne: 'superadmin' } }).select('-password').sort({ realName: 1, username: 1 });
         const todayRecords = await StaffAttendance.find({ date: { $gte: startOfDay, $lte: endOfDay } });
 
         const map = {};
         todayRecords.forEach(r => map[r.adminId.toString()] = r);
 
-        const staffList = allAdmins.map(a => ({
-            adminId: a._id,
-            username: a.username,
-            realName: a.realName || '',
-            employeeId: a.employeeId || '',
-            status: map[a._id.toString()] ? map[a._id.toString()].status : 'Present',
-            remarks: map[a._id.toString()] ? map[a._id.toString()].remarks : '',
-            entryTime: map[a._id.toString()] ? map[a._id.toString()].entryTime : '',
-            exitTime: map[a._id.toString()] ? map[a._id.toString()].exitTime : ''
-        }));
+        const staffList = allAdmins.map(a => {
+            const rec = map[a._id.toString()];
+            return {
+                adminId: a._id,
+                username: a.username,
+                realName: a.realName || '',
+                employeeId: a.employeeId || '',
+                status: rec ? rec.status : 'Present',
+                remarks: rec ? rec.remarks : '',
+                entryTime: rec ? rec.entryTime : '',
+                exitTime: rec ? rec.exitTime : '',
+                // Self-submitted records awaiting review already show up in
+                // Pending Approvals — flag them here so the roster UI can lock
+                // that row instead of presenting an editable duplicate.
+                approvalStatus: rec ? rec.approvalStatus : null,
+            };
+        });
 
         res.json({ success: true, staffList });
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
 // Admin: Bulk mark staff attendance
-router.post('/staff-attendance/bulk', auth, requirePermission('staff.attendance.approve'), async (req, res) => {
+router.post('/staff-attendance/bulk', auth, canApproveStaffAttendance, async (req, res) => {
     try {
         const { date, records } = req.body;
         const startOfDay = new Date(date);
@@ -853,7 +952,7 @@ router.get('/payroll/:id/pdf', auth, async (req, res) => {
 
 // ---- RESULTS ----
 
-router.get('/results/:id([0-9a-fA-F]{24})/pdf', auth, requirePermission('results.manage'), async (req, res) => {
+router.get('/results/:id([0-9a-fA-F]{24})/pdf', auth, requirePermission('results.manage'), resultClassAccess, async (req, res) => {
     try {
         const result = await Result.findById(req.params.id);
         if (!result) return res.status(404).json({ error: 'Result not found' });
@@ -879,10 +978,19 @@ router.post('/results/bulk', auth, requirePermission('results.manage'), async (r
             return res.status(400).json({ success: false, message: 'Missing required fields or records' });
         }
 
+        let scopedRecords = records;
+        if (isRestricted(req.admin)) {
+            const ids = records.map(r => r.studentId);
+            const allowedIds = new Set(
+                (await Student.find({ _id: { $in: ids }, class: { $in: req.admin.allowedClasses } }).select('_id')).map(s => String(s._id))
+            );
+            scopedRecords = records.filter(r => allowedIds.has(String(r.studentId)));
+        }
+
         let count = 0;
-        for (const rec of records) {
+        for (const rec of scopedRecords) {
             if (!rec.subjects || rec.subjects.length === 0) continue;
-            
+
             // Upsert prevents duplicates for the same exam
             await Result.findOneAndUpdate(
                 { studentId: rec.studentId, examName, term, academicYear },
@@ -899,7 +1007,7 @@ router.post('/results/bulk', auth, requirePermission('results.manage'), async (r
     }
 });
 
-router.post('/results', auth, requirePermission('results.manage'), async (req, res) => {
+router.post('/results', auth, requirePermission('results.manage'), classAccessById, async (req, res) => {
     try {
         const { studentId, examName, term, academicYear, examDate, subjects, remark } = req.body;
         if (!studentId || !examName || !academicYear) {
@@ -920,12 +1028,13 @@ router.post('/results', auth, requirePermission('results.manage'), async (req, r
         const result = new Result({ studentId, examName, term, academicYear, examDate, subjects, remark });
         await result.save();
         res.status(201).json({ success: true, message: 'Result added' });
+        notifyStudent(studentId, '📊 Result Published', `Your ${examName} result is now available.`, { url: '/(auth)/results' });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
 });
 
-router.get('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
+router.get('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), resultClassAccess, async (req, res) => {
     try {
         const result = await Result.findById(req.params.id);
         res.json({ success: true, result });
@@ -934,7 +1043,7 @@ router.get('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.man
     }
 });
 
-router.put('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
+router.put('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), resultClassAccess, async (req, res) => {
     try {
         const { examName, term, academicYear, examDate, subjects, remark } = req.body;
         const result = await Result.findByIdAndUpdate(
@@ -948,7 +1057,7 @@ router.put('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.man
     }
 });
 
-router.delete('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), async (req, res) => {
+router.delete('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.manage'), resultClassAccess, async (req, res) => {
     try {
         await Result.findByIdAndDelete(req.params.id);
         res.json({ success: true, message: 'Result deleted' });
@@ -958,7 +1067,7 @@ router.delete('/results/:id([0-9a-fA-F]{24})', auth, requirePermission('results.
 });
 
 // ---- ATTENDANCE ----
-router.post('/attendance', auth, requirePermission('attendance.manage'), async (req, res) => {
+router.post('/attendance', auth, requirePermission('attendance.manage'), classAccessById, async (req, res) => {
     try {
         const { studentId, date, status, remarks } = req.body;
         const day = new Date(date);
@@ -985,6 +1094,9 @@ router.post('/attendance', auth, requirePermission('attendance.manage'), async (
 // ---- TIMETABLE ----
 router.get('/timetable', auth, requirePermission('timetable.manage'), async (req, res) => {
     try {
+        if (!canAccessClass(req.admin, req.query.class)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+        }
         const tt = await Timetable.findOne({ class: req.query.class, section: req.query.section || '' });
         res.json({ success: true, timetable: tt });
     } catch (error) {
@@ -994,6 +1106,9 @@ router.get('/timetable', auth, requirePermission('timetable.manage'), async (req
 
 router.post('/timetable', auth, requirePermission('timetable.manage'), async (req, res) => {
     try {
+        if (!canAccessClass(req.admin, req.body.class)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+        }
         const tt = await Timetable.findOneAndUpdate(
             { class: req.body.class, section: req.body.section || '' },
             req.body,
@@ -1008,7 +1123,7 @@ router.post('/timetable', auth, requirePermission('timetable.manage'), async (re
 // ---- FEES ----
 
 // Add single fee (due)
-router.post('/fees', auth, requirePermission('fees.manage'), async (req, res) => {
+router.post('/fees', auth, requirePermission('fees.manage'), classAccessById, async (req, res) => {
     try {
         const { studentId, academicYear, category, feeType, amount, discount, discountReason, dueDate } = req.body;
         if (!studentId || !academicYear || !feeType || !amount) {
@@ -1024,13 +1139,14 @@ router.post('/fees', auth, requirePermission('fees.manage'), async (req, res) =>
         const fee = new Fee({ studentId, academicYear, category, feeType, amount: validAmt, discount: validDisc, discountReason: discountReason || '', dueDate });
         await fee.save();
         res.status(201).json({ success: true, message: 'Fee due added' });
+        notifyStudent(studentId, '💰 New Fee Added', `${feeType} — ₹${validAmt.toLocaleString('en-IN')}`, { url: '/(auth)/fees' });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
 });
 
 // Edit fee details
-router.patch('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), async (req, res) => {
+router.patch('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), feeClassAccess('id'), async (req, res) => {
     try {
         const { academicYear, feeType, amount, discount, discountReason, category, dueDate } = req.body;
         
@@ -1062,7 +1178,7 @@ router.patch('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'
 });
 
 // Record payment (installment)
-router.post('/fees/:id([0-9a-fA-F]{24})/pay', auth, requirePermission('fees.manage'), async (req, res) => {
+router.post('/fees/:id([0-9a-fA-F]{24})/pay', auth, requirePermission('fees.manage'), feeClassAccess('id'), async (req, res) => {
     try {
         const { amount, mode, receiptNo, remarks, date, collectedBy } = req.body;
         
@@ -1113,7 +1229,7 @@ router.post('/fees/:id([0-9a-fA-F]{24})/pay', auth, requirePermission('fees.mana
 });
 
 // Delete a specific payment
-router.delete('/fees/:feeId([0-9a-fA-F]{24})/pay/:paymentId', auth, requirePermission('fees.manage'), async (req, res) => {
+router.delete('/fees/:feeId([0-9a-fA-F]{24})/pay/:paymentId', auth, requirePermission('fees.manage'), feeClassAccess('feeId'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.feeId);
         if (!fee) return res.status(404).json({ success: false, message: 'Fee not found' });
@@ -1139,7 +1255,7 @@ router.delete('/fees/:feeId([0-9a-fA-F]{24})/pay/:paymentId', auth, requirePermi
 });
 
 // Delete entire fee
-router.delete('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), async (req, res) => {
+router.delete('/fees/:id([0-9a-fA-F]{24})', auth, requirePermission('fees.manage'), feeClassAccess('id'), async (req, res) => {
     try {
         const fee = await Fee.findById(req.params.id);
         await Fee.findByIdAndDelete(req.params.id);
@@ -1173,7 +1289,12 @@ router.post('/fees/bulk-selected', auth, requirePermission('fees.manage'), async
             return res.status(400).json({ success: false, message: 'Invalid fee amount or discount. Discount cannot exceed total amount.' });
         }
 
-        const fees = studentIds.map(id => ({
+        let scopedIds = studentIds;
+        if (isRestricted(req.admin)) {
+            scopedIds = (await Student.find({ _id: { $in: studentIds }, class: { $in: req.admin.allowedClasses } }).select('_id')).map(s => String(s._id));
+        }
+
+        const fees = scopedIds.map(id => ({
             studentId: id,
             academicYear,
             category: category || 'Other',
@@ -1188,18 +1309,20 @@ router.post('/fees/bulk-selected', auth, requirePermission('fees.manage'), async
 
         // 🔍 AUDIT
         await logAction(req, {
-            action: `Bulk assigned "${feeType}" ₹${amount} to ${studentIds.length} students`,
+            action: `Bulk assigned "${feeType}" ₹${amount} to ${scopedIds.length} students`,
             category: 'FEE'
         });
 
-        res.status(201).json({ success: true, message: `Dues assigned to ${studentIds.length} students` });
+        res.status(201).json({ success: true, message: `Dues assigned to ${scopedIds.length} students` });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
 });
 
 // ---- STUDENT DOCUMENTS ----
-router.post('/documents', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
+// classAccessById runs AFTER multer (uploadDoc) since req.body.studentId isn't
+// populated for multipart/form-data until the file middleware parses it.
+router.post('/documents', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), classAccessById, async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
         const doc = new StudentDoc({
@@ -1228,13 +1351,17 @@ router.post('/documents/bulk', auth, requirePermission('studentdocs.manage'), up
             return res.status(400).json({ success: false, message: 'No students selected' });
         }
 
+        if (isRestricted(req.admin)) {
+            studentIds = (await Student.find({ _id: { $in: studentIds }, class: { $in: req.admin.allowedClasses } }).select('_id')).map(s => String(s._id));
+        }
+
         const docsToInsert = studentIds.map(id => ({
             studentId: id, title: req.body.title,
             fileUrl: req.file.path, cloudinaryId: req.file.filename
         }));
 
         await StudentDoc.insertMany(docsToInsert);
-        
+
         await logAction(req, {
             action: `Bulk uploaded doc "${req.body.title}" to ${studentIds.length} students`,
             category: 'STUDENT'
@@ -1246,7 +1373,7 @@ router.post('/documents/bulk', auth, requirePermission('studentdocs.manage'), up
     }
 });
 
-router.get('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), async (req, res) => {
+router.get('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), docClassAccess, async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         res.json({ success: true, document: doc });
@@ -1255,7 +1382,7 @@ router.get('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdo
     }
 });
 
-router.put('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), uploadDoc.single('file'), async (req, res) => {
+router.put('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), docClassAccess, uploadDoc.single('file'), async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
@@ -1274,7 +1401,7 @@ router.put('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdo
     }
 });
 
-router.delete('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), async (req, res) => {
+router.delete('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studentdocs.manage'), docClassAccess, async (req, res) => {
     try {
         const doc = await StudentDoc.findById(req.params.id);
         if (doc && doc.cloudinaryId) {
@@ -1293,8 +1420,16 @@ router.delete('/documents/:id([0-9a-fA-F]{24})', auth, requirePermission('studen
 
 // ============ FINANCE / DCR (Permission Based) ============
 
+// Helper for reports
+function canViewReports(req, res, next) {
+    if (req.admin.role === 'superadmin') return next();
+    const p = req.admin.permissions || [];
+    if (p.includes('reports.view') || p.includes('fees.manage')) return next();
+    return res.status(403).json({ success: false, message: 'Permission denied for viewing reports.' });
+}
+
 // 1. COLLECTION REPORT
-router.get('/collection-report', auth, requirePermission('reports.view'), async (req, res) => {
+router.get('/collection-report', auth, canViewReports, async (req, res) => {
     try {
         const from = new Date(req.query.from);
         from.setHours(0, 0, 0, 0);
@@ -1306,6 +1441,7 @@ router.get('/collection-report', auth, requirePermission('reports.view'), async 
             { $match: { 'payments.date': { $gte: from, $lte: to } } },
             { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
             { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
             { $project: {
                 amount: '$payments.amount',
                 mode: '$payments.mode',
@@ -1350,6 +1486,7 @@ router.get('/pending-summary', auth, requirePermission('reports.view'), async (r
             { $match: { pending: { $gt: 0 } } },
             { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
             { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
             { $group: { _id: '$stu.class', classPending: { $sum: '$pending' } } },
             { $sort: { classPending: -1 } }
         ]);
@@ -1364,6 +1501,11 @@ router.get('/pending-summary', auth, requirePermission('reports.view'), async (r
             { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
             { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
             { $match: { pending: { $gt: 0 } } },
+            ...(isRestricted(req.admin) ? [
+                { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+                { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+                { $match: { 'stu.class': { $in: req.admin.allowedClasses } } },
+            ] : []),
             { $group: { _id: '$academicYear', pending: { $sum: '$pending' } } }
         ]);
         // build current + last FY labels
@@ -1407,6 +1549,7 @@ router.get('/defaulters', auth, requirePermission('reports.view'), async (req, r
             { $unwind: '$stu' }
         ];
         if (req.query.class) pipeline.push({ $match: { 'stu.class': req.query.class } });
+        if (isRestricted(req.admin)) pipeline.push({ $match: { 'stu.class': { $in: req.admin.allowedClasses } } });
         pipeline.push(
             { $project: {
                 name: '$stu.name', rollNumber: '$stu.rollNumber',
@@ -1432,6 +1575,11 @@ router.get('/today-collection', auth, requirePermission('reports.view'), async (
         const data = await Fee.aggregate([
             { $unwind: '$payments' },
             { $match: { 'payments.date': { $gte: start, $lte: end } } },
+            ...(isRestricted(req.admin) ? [
+                { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+                { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+                { $match: { 'stu.class': { $in: req.admin.allowedClasses } } },
+            ] : []),
             { $group: { _id: null, total: { $sum: '$payments.amount' }, count: { $sum: 1 } } }
         ]);
         res.json({ success: true, total: data[0]?.total || 0, count: data[0]?.count || 0 });
@@ -1444,25 +1592,319 @@ router.get('/today-collection', auth, requirePermission('reports.view'), async (
 // Bulk promote selected students to a new class
 router.post('/students/bulk-promote', auth, requirePermission('students.edit'), async (req, res) => {
     try {
-        const { studentIds, newClass } = req.body;
+        let { studentIds, newClass } = req.body;
         if (!studentIds || studentIds.length === 0 || !newClass) {
             return res.status(400).json({ success: false, message: 'Select students and target class' });
         }
+        // "Graduated" is a terminal status, not a manageable class — always allowed
+        // as a target even for a class-restricted subadmin.
+        if (String(newClass) !== 'Graduated' && !canAccessClass(req.admin, String(newClass))) {
+            return res.status(403).json({ success: false, message: 'You do not have access to the target class' });
+        }
+        const promoteQuery = { _id: { $in: studentIds } };
+        applyClassScope(req, promoteQuery);
 
-        await Student.updateMany(
-            { _id: { $in: studentIds } },
+        const result = await Student.updateMany(
+            promoteQuery,
             { $set: { class: String(newClass), section: '' } }   // section cleared
         );
 
         // 🔍 AUDIT
         await logAction(req, {
-            action: `Promoted ${studentIds.length} students → Class ${newClass}`,
+            action: `Promoted ${result.modifiedCount} students → Class ${newClass}`,
             category: 'STUDENT'
         });
 
-        res.json({ success: true, message: `${studentIds.length} students promoted to Class ${newClass}` });
+        res.json({ success: true, message: `${result.modifiedCount} students promoted to Class ${newClass}` });
     } catch (e) {
         res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+// ============ FEES MANAGEMENT (consolidated reporting tab) ============
+// Replaces the old separate Fees Summary / Collection / Fees Reports tabs with
+// one richer set of endpoints: filterable collection report, DCR, defaulters
+// with overdue tracking, head-wise revenue, discounts granted, and a per-student
+// ledger. All gated the same way as the old collection-report (canViewReports,
+// defined above) so any admin who could see reports before still can.
+
+// Distinct filter option lists for the report filter dropdowns.
+router.get('/fees-management/fee-heads', auth, canViewReports, async (req, res) => {
+    try {
+        const categories = Fee.schema.path('category').enumValues;
+        const feeTypes = await Fee.distinct('feeType');
+        res.json({ success: true, categories, feeTypes: feeTypes.filter(Boolean).sort() });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+router.get('/fees-management/cashiers', auth, canViewReports, async (req, res) => {
+    try {
+        const cashiers = await Fee.distinct('payments.collectedBy');
+        res.json({ success: true, cashiers: cashiers.filter(Boolean).sort() });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Collection report — date range (required) + optional class/category/fee
+// type/mode/cashier filters, all applied server-side. export=1 returns every
+// matching row (for CSV) instead of the paginated slice used for the on-screen table.
+router.get('/fees-management/collection', auth, canViewReports, async (req, res) => {
+    try {
+        const from = new Date(req.query.from);
+        from.setHours(0, 0, 0, 0);
+        const to = new Date(req.query.to);
+        to.setHours(23, 59, 59, 999);
+
+        const paymentMatch = { 'payments.date': { $gte: from, $lte: to } };
+        if (req.query.mode) paymentMatch['payments.mode'] = req.query.mode;
+        if (req.query.collectedBy) paymentMatch['payments.collectedBy'] = req.query.collectedBy;
+
+        const pipeline = [
+            { $unwind: '$payments' },
+            { $match: paymentMatch },
+            ...(req.query.category ? [{ $match: { category: req.query.category } }] : []),
+            ...(req.query.feeType ? [{ $match: { feeType: { $regex: req.query.feeType, $options: 'i' } } }] : []),
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...(req.query.class ? [{ $match: { 'stu.class': req.query.class } }] : []),
+            ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
+            { $project: {
+                amount: '$payments.amount',
+                mode: '$payments.mode',
+                receiptNo: '$payments.receiptNo',
+                collectedBy: '$payments.collectedBy',
+                date: '$payments.date',
+                category: '$category',
+                feeType: '$feeType',
+                studentName: '$stu.name',
+                rollNumber: '$stu.rollNumber',
+                class: '$stu.class'
+            } },
+            { $sort: { date: -1 } }
+        ];
+
+        const data = await Fee.aggregate(pipeline);
+        const total = data.reduce((s, p) => s + p.amount, 0);
+        const byMode = {}, byCategory = {}, byStaff = {}, byClass = {};
+        data.forEach(p => {
+            byMode[p.mode] = (byMode[p.mode] || 0) + p.amount;
+            byCategory[p.category] = (byCategory[p.category] || 0) + p.amount;
+            byStaff[p.collectedBy] = (byStaff[p.collectedBy] || 0) + p.amount;
+            byClass[p.class || 'Unknown'] = (byClass[p.class || 'Unknown'] || 0) + p.amount;
+        });
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 25;
+        const payments = req.query.export === '1' ? data : data.slice((page - 1) * limit, page * limit);
+
+        res.json({ success: true, total, count: data.length, byMode, byCategory, byStaff, byClass, payments, page, pages: Math.ceil(data.length / limit) || 1 });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Daily Collection Report (DCR) — single day (defaults to today), optional class filter.
+router.get('/fees-management/dcr', auth, canViewReports, async (req, res) => {
+    try {
+        const day = req.query.date ? new Date(req.query.date) : new Date();
+        const start = new Date(day); start.setHours(0, 0, 0, 0);
+        const end = new Date(day); end.setHours(23, 59, 59, 999);
+
+        const pipeline = [
+            { $unwind: '$payments' },
+            { $match: { 'payments.date': { $gte: start, $lte: end } } },
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...(req.query.class ? [{ $match: { 'stu.class': req.query.class } }] : []),
+            ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
+            { $project: {
+                amount: '$payments.amount',
+                mode: '$payments.mode',
+                receiptNo: '$payments.receiptNo',
+                collectedBy: '$payments.collectedBy',
+                date: '$payments.date',
+                category: '$category',
+                feeType: '$feeType',
+                studentName: '$stu.name',
+                rollNumber: '$stu.rollNumber',
+                class: '$stu.class'
+            } },
+            { $sort: { date: 1 } }
+        ];
+
+        const payments = await Fee.aggregate(pipeline);
+        const total = payments.reduce((s, p) => s + p.amount, 0);
+        const byMode = {}, byCategory = {}, byStaff = {};
+        payments.forEach(p => {
+            byMode[p.mode] = (byMode[p.mode] || 0) + p.amount;
+            byCategory[p.category] = (byCategory[p.category] || 0) + p.amount;
+            byStaff[p.collectedBy] = (byStaff[p.collectedBy] || 0) + p.amount;
+        });
+
+        res.json({ success: true, date: start.toISOString().slice(0, 10), total, count: payments.length, byMode, byCategory, byStaff, payments });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Defaulters — pending dues per student, with overdue-days tracking based on the
+// oldest unpaid fee's dueDate. No late-fee-rate field exists in the schema, so a
+// monetary late fee is only computed when the caller supplies lateFeePerDay
+// (an ad-hoc rate for this report run, not persisted) — otherwise we only ever
+// show overdueDays rather than inventing a late fee figure the school never set.
+router.get('/fees-management/defaulters', auth, canViewReports, async (req, res) => {
+    try {
+        const pipeline = [
+            { $addFields: { disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            { $addFields: { paid: { $sum: '$payments.amount' } } },
+            { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
+            { $match: { pending: { $gt: 0 } } },
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: '$stu' },
+        ];
+        if (req.query.class) pipeline.push({ $match: { 'stu.class': req.query.class } });
+        if (isRestricted(req.admin)) pipeline.push({ $match: { 'stu.class': { $in: req.admin.allowedClasses } } });
+        pipeline.push({
+            $group: {
+                _id: '$studentId',
+                name: { $first: '$stu.name' },
+                rollNumber: { $first: '$stu.rollNumber' },
+                class: { $first: '$stu.class' },
+                section: { $first: '$stu.section' },
+                phone: { $first: '$stu.phone' },
+                parentName: { $first: '$stu.parentName' },
+                totalPending: { $sum: '$pending' },
+                oldestDueDate: { $min: '$dueDate' },
+            }
+        });
+        pipeline.push({ $sort: { totalPending: -1 } });
+
+        const rows = await Fee.aggregate(pipeline);
+        const lateFeePerDay = parseFloat(req.query.lateFeePerDay);
+        const hasLateFeeRate = !isNaN(lateFeePerDay) && lateFeePerDay > 0;
+        const today = new Date();
+        const defaulters = rows.map(r => {
+            const overdueDays = r.oldestDueDate ? Math.max(0, Math.floor((today - new Date(r.oldestDueDate)) / 86400000)) : 0;
+            return { ...r, overdueDays, ...(hasLateFeeRate ? { estimatedLateFee: overdueDays * lateFeePerDay } : {}) };
+        });
+        res.json({ success: true, defaulters, lateFeePerDay: hasLateFeeRate ? lateFeePerDay : null });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Head-wise revenue — per fee category: total raised (all dues ever assigned),
+// discount, pending (snapshot, not date-filtered), and total collected within an
+// optional from/to window — so "collected" reflects a period while the rest is
+// a running total, matching how schools actually read this report.
+router.get('/fees-management/head-wise', auth, canViewReports, async (req, res) => {
+    try {
+        const classFilterStage = [];
+        if (req.query.class) classFilterStage.push({ $match: { 'stu.class': req.query.class } });
+        if (isRestricted(req.admin)) classFilterStage.push({ $match: { 'stu.class': { $in: req.admin.allowedClasses } } });
+
+        const raisedPipeline = [
+            { $addFields: { disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            { $addFields: { paid: { $sum: '$payments.amount' } } },
+            { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...classFilterStage,
+            { $group: {
+                _id: '$category',
+                totalRaised: { $sum: '$amount' },
+                totalDiscount: { $sum: '$disc' },
+                totalPending: { $sum: { $cond: [{ $gt: ['$pending', 0] }, '$pending', 0] } },
+            } }
+        ];
+
+        const collectedMatch = {};
+        if (req.query.from && req.query.to) {
+            const from = new Date(req.query.from); from.setHours(0, 0, 0, 0);
+            const to = new Date(req.query.to); to.setHours(23, 59, 59, 999);
+            collectedMatch['payments.date'] = { $gte: from, $lte: to };
+        }
+        const collectedPipeline = [
+            { $unwind: '$payments' },
+            ...(Object.keys(collectedMatch).length ? [{ $match: collectedMatch }] : []),
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...classFilterStage,
+            { $group: { _id: '$category', totalCollected: { $sum: '$payments.amount' } } }
+        ];
+
+        const [raised, collected] = await Promise.all([
+            Fee.aggregate(raisedPipeline),
+            Fee.aggregate(collectedPipeline),
+        ]);
+        const collectedMap = Object.fromEntries(collected.map(c => [c._id, c.totalCollected]));
+        const rows = raised
+            .map(r => ({
+                category: r._id || 'Other',
+                totalRaised: r.totalRaised,
+                totalDiscount: r.totalDiscount,
+                totalCollected: collectedMap[r._id] || 0,
+                totalPending: r.totalPending,
+            }))
+            .sort((a, b) => b.totalRaised - a.totalRaised);
+
+        res.json({ success: true, rows, collectedRange: Object.keys(collectedMatch).length ? { from: req.query.from, to: req.query.to } : null });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Discounts granted — every fee record with a discount, with the reason and
+// the student it was given to.
+router.get('/fees-management/discounts', auth, canViewReports, async (req, res) => {
+    try {
+        const pipeline = [
+            { $match: { discount: { $gt: 0 } } },
+            ...(req.query.category ? [{ $match: { category: req.query.category } }] : []),
+            { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+            { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+            ...(req.query.class ? [{ $match: { 'stu.class': req.query.class } }] : []),
+            ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
+            { $project: {
+                studentName: '$stu.name', rollNumber: '$stu.rollNumber', class: '$stu.class', section: '$stu.section',
+                category: 1, feeType: 1, academicYear: 1, amount: 1, discount: 1, discountReason: 1, createdAt: 1
+            } },
+            { $sort: { discount: -1 } }
+        ];
+        const discounts = await Fee.aggregate(pipeline);
+        const totalDiscount = discounts.reduce((s, d) => s + d.discount, 0);
+        res.json({ success: true, totalDiscount, count: discounts.length, discounts });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Single student's full fee ledger — every fee doc + its embedded payment
+// history, plus running totals. classAccessById reads req.params.studentId.
+router.get('/fees-management/ledger/:studentId', auth, canViewReports, classAccessById, async (req, res) => {
+    try {
+        const student = await Student.findById(req.params.studentId).select('name rollNumber class section parentName phone');
+        if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+
+        const fees = await Fee.find({ studentId: req.params.studentId }).sort({ createdAt: -1 });
+        const totals = fees.reduce((acc, f) => {
+            const netAmount = f.amount - (f.discount || 0);
+            const paid = (f.payments || []).reduce((s, p) => s + p.amount, 0);
+            acc.totalAmount += f.amount;
+            acc.totalDiscount += (f.discount || 0);
+            acc.totalPaid += paid;
+            acc.totalPending += Math.max(0, netAmount - paid);
+            return acc;
+        }, { totalAmount: 0, totalDiscount: 0, totalPaid: 0, totalPending: 0 });
+
+        res.json({ success: true, student, fees, totals });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
     }
 });
 

@@ -22,19 +22,39 @@ router.post('/', formLimiter, async (req, res) => {
     }
 });
 
-// GET - All messages (Admin only)
+// GET - All messages (Admin only). Paginates only when ?page is supplied, so
+// existing unpaginated callers keep working unchanged.
 router.get('/', auth, requirePermission('messages.view'), async (req, res) => {
     try {
-        const contacts = await Contact.find().sort({ createdAt: -1 });
-        res.json({ 
-            success: true, 
-            count: contacts.length, 
-            contacts 
-        });
+        const query = {};
+        if (req.query.search) {
+            query.$or = [
+                { name: { $regex: req.query.search, $options: 'i' } },
+                { subject: { $regex: req.query.search, $options: 'i' } },
+                { message: { $regex: req.query.search, $options: 'i' } },
+            ];
+        }
+
+        if (!req.query.page) {
+            const contacts = await Contact.find(query).sort({ createdAt: -1 });
+            return res.json({ success: true, count: contacts.length, contacts });
+        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+
+        const total = await Contact.countDocuments(query);
+        const unreadCount = await Contact.countDocuments({ isRead: { $ne: true } });
+        const contacts = await Contact.find(query)
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit);
+
+        res.json({ success: true, contacts, total, page, pages: Math.ceil(total / limit), unreadCount });
     } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: error.message 
+        res.status(500).json({
+            success: false,
+            message: error.message
         });
     }
 });

@@ -7,6 +7,9 @@ const adminSchema = new mongoose.Schema({
     password: { type: String, required: true },
     role: { type: String, enum: ['admin', 'superadmin'], default: 'admin' },
     permissions: { type: [String], default: [] },
+    // Class tokens (e.g. '5', 'Nursery') this admin may access. Empty = no class
+    // access at all (superadmins bypass this field entirely).
+    allowedClasses: { type: [String], default: [] },
     realName: { type: String, default: '' },
     employeeId: { type: String, default: '' },
     phone: { type: String, default: '' },

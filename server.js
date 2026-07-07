@@ -95,6 +95,9 @@ try {
     app.use('/api/audit', require('./routes/audit'));
     console.log('17. Logs audit');
 
+    app.use('/api/homepage-settings', require('./routes/homepageSettings'));
+    console.log('18. homepage-settings route loaded');
+
 
 } catch (err) {
     console.error('❌ Error loading routes:', err.message);

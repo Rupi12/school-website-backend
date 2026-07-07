@@ -25,19 +25,39 @@ router.post('/', formLimiter, async (req, res) => {
 
 
 
-// GET - All applications (Admin only)
+// GET - All applications (Admin only). Paginates only when ?page is supplied, so
+// existing unpaginated callers keep working unchanged.
 router.get('/', auth, requirePermission('applications.view'), async (req, res) => {
     try {
-        const applications = await Application.find().sort({ createdAt: -1 });
-        res.json({ 
-            success: true, 
-            count: applications.length, 
-            applications 
-        });
+        const query = {};
+        if (req.query.status && req.query.status !== 'All') query.status = req.query.status;
+        if (req.query.search) {
+            query.$or = [
+                { studentName: { $regex: req.query.search, $options: 'i' } },
+                { parentName: { $regex: req.query.search, $options: 'i' } },
+            ];
+        }
+
+        if (!req.query.page) {
+            const applications = await Application.find(query).sort({ createdAt: -1 });
+            return res.json({ success: true, count: applications.length, applications });
+        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+
+        const total = await Application.countDocuments(query);
+        const pendingCount = await Application.countDocuments({ status: 'pending' });
+        const applications = await Application.find(query)
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit);
+
+        res.json({ success: true, applications, total, page, pages: Math.ceil(total / limit), pendingCount });
     } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: error.message 
+        res.status(500).json({
+            success: false,
+            message: error.message
         });
     }
 });

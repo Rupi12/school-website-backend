@@ -23,7 +23,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         const token = jwt.sign(
             { id: admin._id, username: admin.username, role: admin.role, permissions: admin.permissions },
             process.env.JWT_SECRET,
-            { expiresIn: '1h' }
+            { expiresIn: '8h' }
         );
 
         // 🔍 AUDIT — login has no auth middleware, log directly
@@ -40,10 +40,21 @@ router.post('/login', loginLimiter, async (req, res) => {
         res.json({
             success: true,
             token,
-            admin: { id: admin._id, username: admin.username, email: admin.email, role: admin.role, permissions: admin.permissions }
+            admin: { id: admin._id, username: admin.username, email: admin.email, role: admin.role, permissions: admin.permissions, allowedClasses: admin.allowedClasses || [] }
         });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// GET - Get current logged-in admin's profile
+router.get('/me', auth, async (req, res) => {
+    try {
+        const admin = await Admin.findById(req.admin.id).select('-password');
+        if (!admin) return res.status(404).json({ success: false, message: 'Admin not found' });
+        res.json({ success: true, admin });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
@@ -76,11 +87,22 @@ router.get('/admins', auth, canViewStaff, async (req, res) => {
 // Create sub-admin
 router.post('/admins', auth, requirePermission('staff.create'), async (req, res) => {
     try {
-        const { username, email, password, permissions } = req.body;
+        const { username, email, password, permissions, allowedClasses } = req.body;
         const exists = await Admin.findOne({ $or: [{ email }, { username }] });
         if (exists) return res.status(400).json({ success: false, message: 'Admin exists' });
+
+        // A non-superadmin can never grant permissions/classes they don't hold
+        // themselves — otherwise `staff.create` alone would let someone mint an
+        // admin with more access than they have (privilege escalation).
+        let grantedPermissions = permissions || [];
+        let grantedClasses = allowedClasses || [];
+        if (req.admin.role !== 'superadmin') {
+            grantedPermissions = grantedPermissions.filter(p => req.admin.permissions.includes(p));
+            grantedClasses = grantedClasses.filter(c => req.admin.allowedClasses.includes(c));
+        }
+
         const hashed = await bcrypt.hash(password, 10);
-        const admin = new Admin({ username, email, password: hashed, role: 'admin', permissions: permissions || [] });
+        const admin = new Admin({ username, email, password: hashed, role: 'admin', permissions: grantedPermissions, allowedClasses: grantedClasses });
         await admin.save();
 
         await logAction(req, {
@@ -99,13 +121,30 @@ router.post('/admins', auth, requirePermission('staff.create'), async (req, res)
 // Update sub-admin permissions & profile
 router.put('/admins/:id', auth, canEditStaff, async (req, res) => {
     try {
-        const { permissions, realName, employeeId, phone, qualifications, joiningDate, basicSalary } = req.body;
-        
+        const target = await Admin.findById(req.params.id).select('role');
+        if (!target) return res.status(404).json({ success: false, message: 'Admin not found' });
+        if (target.role === 'superadmin' && req.admin.role !== 'superadmin') {
+            return res.status(403).json({ success: false, message: 'Cannot edit a superadmin account' });
+        }
+
+        const { permissions, allowedClasses, realName, employeeId, phone, qualifications, joiningDate, basicSalary } = req.body;
+
         const updateData = {};
         const canEditProfile = req.admin.permissions.includes('staff.edit.profile') || req.admin.role === 'superadmin';
         const canEditPerms = req.admin.permissions.includes('staff.edit.permissions') || req.admin.role === 'superadmin';
 
-        if (canEditPerms && permissions) updateData.permissions = permissions;
+        // Same escalation guard as create: a non-superadmin editor can only grant
+        // permissions/classes that they themselves currently hold.
+        if (canEditPerms && permissions) {
+            updateData.permissions = req.admin.role === 'superadmin'
+                ? permissions
+                : permissions.filter(p => req.admin.permissions.includes(p));
+        }
+        if (canEditPerms && allowedClasses !== undefined) {
+            updateData.allowedClasses = req.admin.role === 'superadmin'
+                ? allowedClasses
+                : allowedClasses.filter(c => req.admin.allowedClasses.includes(c));
+        }
         if (canEditProfile && realName !== undefined) updateData.realName = realName;
         if (canEditProfile && employeeId !== undefined) updateData.employeeId = employeeId;
         if (canEditProfile && phone !== undefined) updateData.phone = phone;

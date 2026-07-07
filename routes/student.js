@@ -26,6 +26,8 @@ const upload = multer({
 });
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/permission');
+const { canAccessClass, requireClassAccessForStudent } = require('../middleware/classAccess');
+const classAccessById = requireClassAccessForStudent(Student);
 
 const { generateReceipt } = require('../utils/receiptGenerator');
 const { generateReportCard } = require('../utils/reportCardGenerator');
@@ -51,7 +53,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         const token = jwt.sign(
             { id: student._id, rollNumber: student.rollNumber, role: 'student' },
             process.env.JWT_SECRET,
-            { expiresIn: '1h' }
+            { expiresIn: '8h' }
         );
         res.json({
             success: true, token,
@@ -66,6 +68,16 @@ router.post('/login', loginLimiter, async (req, res) => {
 router.get('/me', studentAuth, async (req, res) => {
     const student = await Student.findById(req.student.id).select('-password');
     res.json({ success: true, student });
+});
+
+// Save this student's Expo push token (for notifications)
+router.post('/push-token', studentAuth, async (req, res) => {
+    try {
+        await Student.findByIdAndUpdate(req.student.id, { pushToken: req.body.token || '' });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 // My results
@@ -146,10 +158,13 @@ router.put('/change-password', studentAuth, async (req, res) => {
 // ==========================================
 // 1. FEATURE: UPDATE STUDENT DETAILS
 // ==========================================
-router.put('/:id', auth, requirePermission('students.edit'), async (req, res) => {
+router.put('/:id', auth, requirePermission('students.edit'), classAccessById, async (req, res) => {
     try {
         const { name, rollNumber, studentClass, section, parentName, phone } = req.body;
-        
+        if (!canAccessClass(req.admin, studentClass)) {
+            return res.status(403).json({ success: false, message: 'You do not have access to the target class' });
+        }
+
         const existing = await Student.findOne({ rollNumber, _id: { $ne: req.params.id } });
         if (existing) {
             return res.status(400).json({ success: false, message: `Roll number ${rollNumber} is already assigned to another student!` });
@@ -183,7 +198,7 @@ router.put('/:id', auth, requirePermission('students.edit'), async (req, res) =>
 // ==========================================
 // 2. FEATURE: RESET STUDENT PASSWORD
 // ==========================================
-router.put('/:id/reset-password', auth, requirePermission('students.edit'), async (req, res) => {
+router.put('/:id/reset-password', auth, requirePermission('students.edit'), classAccessById, async (req, res) => {
     try {
         const { password } = req.body;
         if (!password || password.length < 6) {
@@ -264,7 +279,13 @@ router.post('/bulk', auth, requirePermission('students.add'), upload.single('fil
                     if (!name || !rollNumber || !studentClass) {
                         skipCount++;
                         skippedReasons.push(`Row ${i + 2}: Missing Name, Roll, or Class`);
-                        continue; 
+                        continue;
+                    }
+
+                    if (!canAccessClass(req.admin, studentClass)) {
+                        skipCount++;
+                        skippedReasons.push(`Row ${i + 2}: No access to Class ${studentClass}`);
+                        continue;
                     }
 
                     if (incomingRolls.has(rollNumber)) {
