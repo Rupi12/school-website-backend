@@ -36,6 +36,42 @@ const HomepageSettingsSchema = new mongoose.Schema({
             { name: 'Priya Singh', role: 'Alumna, Batch 2022', quote: 'The foundation I got here shaped my entire career. Forever grateful to my teachers.', rating: 5 },
         ],
     },
+    // `icon` is an emoji character (e.g. '💻'), not a MaterialCommunityIcons name —
+    // the app renders it directly as text, picked from a fixed list in the admin UI.
+    facilities: {
+        type: [{ icon: String, title: String }],
+        default: [
+            { icon: '💻', title: 'Smart Classrooms' },
+            { icon: '🧪', title: 'Science Labs' },
+            { icon: '🏀', title: 'Sports Complex' },
+            { icon: '🚌', title: 'Safe Transport' },
+            { icon: '📷', title: '24/7 CCTV Surveillance' },
+            { icon: '🛡️', title: 'Secure Campus' },
+        ],
+    },
+    // Trust badges shown in a strip on the app homepage. Defaults are facts already
+    // established elsewhere in this schema/app (affiliations, security, transport) —
+    // deliberately not fabricated award/certification names with no backing data.
+    // Update with real awards/certifications as the school earns them.
+    // Every field besides `title` is optional — the app only renders whichever
+    // fields are actually filled in per award, so a plain icon+title award still
+    // works exactly as before.
+    awards: {
+        type: [{
+            icon: String,          // MaterialCommunityIcons name, picked from a fixed list in the admin UI
+            image: String,         // Cloudinary URL — shown instead of the icon badge when present
+            title: String,
+            description: String,
+            highlights: [String],
+            year: String,
+        }],
+        default: [
+            { icon: 'shield-check', title: 'CBSE Affiliated' },
+            { icon: 'shield-check', title: 'RBSE Affiliated' },
+            { icon: 'cctv', title: '24/7 Secure Campus' },
+            { icon: 'bus-school', title: 'Safe Transport' },
+        ],
+    },
 }, { timestamps: true });
 
 module.exports = mongoose.model('HomepageSettings', HomepageSettingsSchema);

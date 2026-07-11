@@ -787,7 +787,7 @@ router.put('/staff-attendance/approve/:id', auth, canApproveStaffAttendance, asy
         const record = await StaffAttendance.findByIdAndUpdate(
             req.params.id,
             { approvalStatus },
-            { new: true }
+            { returnDocument: 'after' }
         );
 
         if (!record) return res.status(404).json({ success: false, message: 'Record not found.' });
@@ -904,7 +904,7 @@ router.post('/payroll/generate', auth, requirePermission('staff.payroll.manage')
         const slip = await Payroll.findOneAndUpdate(
             { adminId, month },
             { basicSalary, allowances, arrears, deductions, netSalary, status, remarks, generatedBy: req.admin.username },
-            { new: true, upsert: true }
+            { returnDocument: 'after', upsert: true }
         );
 
         await logAction(req, { action: `Generated salary slip for ${month}`, category: 'ADMIN', targetId: adminId });
@@ -995,7 +995,7 @@ router.post('/results/bulk', auth, requirePermission('results.manage'), async (r
             await Result.findOneAndUpdate(
                 { studentId: rec.studentId, examName, term, academicYear },
                 { examDate, subjects: rec.subjects, remark: '' },
-                { upsert: true, new: true }
+                { upsert: true, returnDocument: 'after' }
             );
             count++;
         }
@@ -1477,36 +1477,42 @@ router.get('/collection-report', auth, canViewReports, async (req, res) => {
 // 2. PENDING SUMMARY — overall + per class
 router.get('/pending-summary', auth, requirePermission('reports.view'), async (req, res) => {
     try {
-        const result = await Fee.aggregate([
-            { $addFields: { paid: { $sum: '$payments.amount' } } },
-            { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
+        // PER-CLASS breakdown — totalFee sums every fee record (paid or not) so fully-paid
+        // classes still appear (needed for the class-picker dropdown to show *any* class,
+        // not just ones with dues); pending only counts positive amounts via $cond instead
+        // of a $match filter, so both figures come from one aggregation over one class.
+        const classAgg = await Fee.aggregate([
             { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
             { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
             { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
-            { $match: { pending: { $gt: 0 } } },
             { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
             { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
             ...(isRestricted(req.admin) ? [{ $match: { 'stu.class': { $in: req.admin.allowedClasses } } }] : []),
-            { $group: { _id: '$stu.class', classPending: { $sum: '$pending' } } },
-            { $sort: { classPending: -1 } }
+            { $group: {
+                _id: '$stu.class',
+                totalFee: { $sum: '$netAmount' },
+                pending: { $sum: { $cond: [{ $gt: ['$pending', 0] }, '$pending', 0] } }
+            } },
+            { $sort: { pending: -1 } }
         ]);
-        const totalPending = result.reduce((s, r) => s + r.classPending, 0);
-        const byClass = result.map(r => ({ class: r._id || 'Unknown', pending: r.classPending }));
+        const totalPending = classAgg.reduce((s, r) => s + r.pending, 0);
+        const byClass = classAgg.map(r => ({ class: r._id || 'Unknown', pending: r.pending, totalFee: r.totalFee }));
 
-        // YEAR-WISE breakdown
+        // YEAR-WISE breakdown — same totalFee-alongside-pending pattern as byClass above.
         const yearAgg = await Fee.aggregate([
-            { $addFields: { paid: { $sum: '$payments.amount' } } },
-            { $addFields: { pending: { $subtract: ['$amount', '$paid'] } } },
             { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
             { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
             { $addFields: { pending: { $subtract: ['$netAmount', '$paid'] } } },
-            { $match: { pending: { $gt: 0 } } },
             ...(isRestricted(req.admin) ? [
                 { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
                 { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
                 { $match: { 'stu.class': { $in: req.admin.allowedClasses } } },
             ] : []),
-            { $group: { _id: '$academicYear', pending: { $sum: '$pending' } } }
+            { $group: {
+                _id: '$academicYear',
+                totalFee: { $sum: '$netAmount' },
+                pending: { $sum: { $cond: [{ $gt: ['$pending', 0] }, '$pending', 0] } }
+            } }
         ]);
         // build current + last FY labels
         const now = new Date();
@@ -1517,17 +1523,37 @@ router.get('/pending-summary', auth, requirePermission('reports.view'), async (r
         const lastFY = `${startYear - 1}-${String(startYear).slice(2)}`;
 
         let current = 0, last = 0, older = 0;
+        let currentFee = 0, lastFee = 0, olderFee = 0;
         yearAgg.forEach(r => {
-            if (r._id === currentFY) current += r.pending;
-            else if (r._id === lastFY) last += r.pending;
-            else older += r.pending; // includes "Previous Years" + any older strings
+            if (r._id === currentFY) { current += r.pending; currentFee += r.totalFee; }
+            else if (r._id === lastFY) { last += r.pending; lastFee += r.totalFee; }
+            else { older += r.pending; olderFee += r.totalFee; } // includes "Previous Years" + any older strings
         });
+
+        // OVERALL TOTALS — unlike the breakdowns above, this does NOT filter to
+        // pending > 0, so it includes fully-paid records too. Gives "Total Fee"
+        // (the total collectable across every student, paid or not) alongside
+        // "Total Pending", which previously had no counterpart anywhere in the app/site.
+        const totalsAgg = await Fee.aggregate([
+            { $addFields: { paid: { $sum: '$payments.amount' }, disc: { $ifNull: ['$discount', 0] } } },
+            { $addFields: { netAmount: { $subtract: ['$amount', '$disc'] } } },
+            ...(isRestricted(req.admin) ? [
+                { $lookup: { from: 'students', localField: 'studentId', foreignField: '_id', as: 'stu' } },
+                { $unwind: { path: '$stu', preserveNullAndEmptyArrays: true } },
+                { $match: { 'stu.class': { $in: req.admin.allowedClasses } } },
+            ] : []),
+            { $group: { _id: null, totalFee: { $sum: '$netAmount' }, totalCollected: { $sum: '$paid' } } }
+        ]);
+        const totalFee = totalsAgg[0]?.totalFee || 0;
+        const totalCollected = totalsAgg[0]?.totalCollected || 0;
 
         res.json({
             success: true,
+            totalFee,
+            totalCollected,
             totalPending,
             byClass,
-            byYear: { currentFY, current, lastFY, last, older }
+            byYear: { currentFY, current, currentFee, lastFY, last, lastFee, older, olderFee }
         });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
